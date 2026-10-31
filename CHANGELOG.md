@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/tsyirvo/rex-lanes/compare/lanes-v0.1.0...lanes-v0.1.1) (2026-10-31)
+
+
+### Documentation
+
+* simplify readme ([#3](https://github.com/tsyirvo/rex-lanes/issues/3)) ([e657f22](https://github.com/tsyirvo/rex-lanes/commit/e657f22d45b5db816c576f01fd72ca3c11ba5e51))
+
 ## 0.1.0 (2026-10-31)
 
 
