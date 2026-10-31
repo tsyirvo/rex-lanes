@@ -1,0 +1,24 @@
+amends "package://github.com/jdx/hk/releases/download/v2.10.0/hk@2.10.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.10.0/hk@2.10.0#/Builtins.pkl"
+
+hooks {
+  ["pre-commit"] {
+    steps {
+      ["gitleaks"] = Builtins.gitleaks
+      ["lint"] {
+        glob = "modal.sh"
+        check = "mise run lint"
+      }
+      ["test"] {
+        glob = List("*.lua", "tests/**")
+        check = "mise run test"
+      }
+    }
+  }
+  // release-please reads these messages to pick the next version.
+  ["commit-msg"] {
+    steps {
+      ["conventional-commit"] = Builtins.check_conventional_commit
+    }
+  }
+}

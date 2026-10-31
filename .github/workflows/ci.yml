@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y lua5.1 shellcheck
+      - run: lua5.1 tests/layout_test.lua
+      - run: shellcheck modal.sh
+
+  # macOS ships bash 3.2, which modal.sh must keep working under.
+  bash-3:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: /bin/bash --version && /bin/bash -n modal.sh
