@@ -15,6 +15,6 @@ jobs:
     steps:
       # A PAT, not GITHUB_TOKEN: GitHub runs no workflows on PRs that
       # GITHUB_TOKEN opens, so the release PR would get no CI.
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
