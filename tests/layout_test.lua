@@ -50,6 +50,12 @@ test("describe falls back to the folder name without a forge name", function()
   eq(L.describe("/w", "b", "/src/folder", nil).repo, "folder")
 end)
 
+test("is_within takes the root and its subfolders, not a sibling", function()
+  eq(L.is_within("/src/app", "/src/app"), true)
+  eq(L.is_within("/src/app/mobile", "/src/app"), true)
+  eq(L.is_within("/src/app.feat", "/src/app"), false)
+end)
+
 test("label is repo/branch", function()
   eq(L.label(wt), "My-App/feat")
 end)
