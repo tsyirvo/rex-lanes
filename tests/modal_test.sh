@@ -345,13 +345,13 @@ describes_what_return_will_do() {
   source "$ROOT/picker.sh"
   export PICKER_BASE=main
   eq "$(describe_return '' attached worktree)" "↵ open attached"
-  eq "$(describe_return '' local-branch branch)" "↵ new worktree on existing branch local-branch"
+  eq "$(describe_return '' local-branch local)" "↵ new worktree on existing branch local-branch"
   eq "$(describe_return '' '' '')" "Type a branch name"
   eq "$(describe_return attached attached worktree)" "↵ open attached"
-  eq "$(describe_return local-branch local-branch branch)" "↵ new worktree on existing branch local-branch"
+  eq "$(describe_return local-branch local-branch local)" "↵ new worktree on existing branch local-branch"
   eq "$(describe_return remote-branch '' '')" "↵ new worktree tracking remote branch remote-branch"
   eq "$(describe_return fresh '' '')" "↵ create new branch fresh from main"
-  eq "$(describe_return loc local-branch branch)" "↵ create new branch loc from main  ·  alt-↵ use local-branch"
+  eq "$(describe_return loc local-branch local)" "↵ create new branch loc from main  ·  alt-↵ use local-branch"
   eq "$(describe_return 'not..valid' '' '')" "Not a valid branch name"
 }
 
@@ -363,7 +363,7 @@ steps_over_headings_in_the_direction_of_travel() {
   eq "$(FZF_ACTION=down FZF_POS=5 step_over_heading heading)" down "moving down"
   eq "$(FZF_ACTION=up FZF_POS=1 step_over_heading heading)" down "at the top"
   eq "$(FZF_ACTION=mouse FZF_POS=1 step_over_heading heading)" down "after a reset"
-  eq "$(FZF_ACTION=up FZF_POS=5 step_over_heading branch)" "" "on a row"
+  eq "$(FZF_ACTION=up FZF_POS=5 step_over_heading local)" "" "on a row"
 }
 
 explains_an_fzf_that_is_too_old() {
@@ -376,12 +376,12 @@ explains_an_fzf_that_is_too_old() {
 compares_fzf_versions_as_numbers() {
   # shellcheck disable=SC1091
   source "$ROOT/picker.sh"
-  # shellcheck disable=SC2329 # picker_incompatibility calls it
+  # shellcheck disable=SC2329 # fzf_version_problem calls it
   fzf() { echo "$FAKE_FZF_VERSION (fake)"; }
   FAKE_FZF_VERSION=0.100.0
-  eq "$(picker_incompatibility)" "" "0.100.0"
+  eq "$(fzf_version_problem)" "" "0.100.0"
   FAKE_FZF_VERSION=0.71.0
-  eq "$(picker_incompatibility)" "" "0.71.0"
+  eq "$(fzf_version_problem)" "" "0.71.0"
 }
 
 for name in \

@@ -6,8 +6,8 @@
 #
 #   bash -c "$(cat picker.sh modal.sh)" lanes MODE CLIENT BUNDLE [ARG...]
 #
-#   new CLIENT BUNDLE rex             list worktrees, type a branch name, pick an
-#   new CLIENT BUNDLE list AGENT...   agent, create or open its session
+#   new CLIENT BUNDLE rex             pick or type a branch, pick an agent, create
+#   new CLIENT BUNDLE list AGENT...   or open its session
 #   remove CLIENT BUNDLE              pick a worktree, `wt remove` it, close its session
 #
 # CLIENT is the Rex client that opened the modal, or "" if it is not known.
@@ -40,10 +40,10 @@ WT_SCHEMA=2
 # Runs an action from the bundle.
 rexdo() { rex ${CLIENT:+-C "$CLIENT"} "do" - --action "$@" <<<"$BUNDLE"; }
 
-# Reads the repo with one `wt list`. Sets ITEMS, one line per worktree: branch,
-# path (with ~), "main" or "", absolute path. Sets MAIN to the main checkout's
-# path, REPO to the forge's name for the repo ("" without a forge), and
-# DEFAULT_BRANCH to the repo's default branch ("" if wt can't tell).
+# Reads the repo with one `wt list`. Sets WORKTREES, one line per worktree:
+# branch, path (with ~), "main" or "", absolute path. Sets MAIN to the main
+# checkout's path, REPO to the forge's name for the repo ("" without a forge),
+# and DEFAULT_BRANCH to the repo's default branch ("" if wt can't tell).
 load() {
   local json
   json=$(command wt list --format=json 2>/dev/null) || hold "wt list failed"
@@ -51,17 +51,17 @@ load() {
   schema=$(jq -r '.schema // "none"' <<<"$json")
   [[ $schema == "$WT_SCHEMA" ]] \
     || hold "Lanes reads schema $WT_SCHEMA of wt list's JSON, but this wt prints schema $schema. Update Lanes or WorkTrunk."
-  ITEMS=$(jq -r --arg home "$HOME" '
+  WORKTREES=$(jq -r --arg home "$HOME" '
     .items[] | select(.worktree != null and .branch != null)
     | [.branch, (.worktree.path | sub("^" + $home; "~")),
        (if .worktree.main then "main" else "" end), .worktree.path]
     | @tsv' <<<"$json")
   REPO=$(jq -r '.repo.forge.name // empty' <<<"$json")
   DEFAULT_BRANCH=$(jq -r '.repo.default_branch // empty' <<<"$json")
-  MAIN=$(awk -F'\t' '$3 == "main" { print $4; exit }' <<<"$ITEMS")
+  MAIN=$(awk -F'\t' '$3 == "main" { print $4; exit }' <<<"$WORKTREES")
 }
 
-path_of() { awk -F'\t' -v b="$1" '$1 == b { print $4; exit }' <<<"$ITEMS"; }
+path_of() { awk -F'\t' -v b="$1" '$1 == b { print $4; exit }' <<<"$WORKTREES"; }
 
 # The agent commands to offer, one per line: the agents Rex supports, or the
 # configured list, each only when its program is on PATH. Rex names an agent
@@ -102,9 +102,9 @@ If the session is in the sidebar, turn on Rex → Settings → Rex Server → Re
 }
 
 new() {
-  local incompatibility out name path kind agent base
-  incompatibility=$(picker_incompatibility)
-  [[ -z $incompatibility ]] || hold "$incompatibility"
+  local version_problem out name path kind agent base
+  version_problem=$(fzf_version_problem)
+  [[ -z $version_problem ]] || hold "$version_problem"
   load
 
   # A new branch builds on what the focused pane has checked out: its branch,
@@ -112,7 +112,7 @@ new() {
   base=$(git branch --show-current)
   [[ -n $base ]] || base=$(git rev-parse HEAD) || hold "Can't tell which commit to branch from"
 
-  name=$(pick_branch "$base" "$ITEMS" "$DEFAULT_BRANCH") || exit 0
+  name=$(pick_branch "$base" "$WORKTREES" "$DEFAULT_BRANCH") || exit 0
 
   path=$(path_of "$name")
   if [[ -n $path ]]; then
@@ -145,7 +145,7 @@ new() {
 remove() {
   local cands sel name path
   load
-  cands=$(awk -F'\t' '$3 != "main"' <<<"$ITEMS")
+  cands=$(awk -F'\t' '$3 != "main"' <<<"$WORKTREES")
   [[ -n $cands ]] || { dim "No worktrees to remove besides the main checkout."; sleep 1.5; exit 0; }
 
   sel=$(fzf "${FZF_OPTS[@]}" \

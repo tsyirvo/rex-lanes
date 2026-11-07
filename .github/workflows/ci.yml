@@ -15,6 +15,7 @@ jobs:
       - run: lua5.1 tests/init_test.lua
       - run: shellcheck picker.sh modal.sh tests/modal_test.sh
 
+  # macOS ships bash 3.2, which the scripts must keep working under.
   modal:
     strategy:
       fail-fast: false
@@ -27,10 +28,3 @@ jobs:
         with:
           install_args: fzf worktrunk
       - run: /bin/bash tests/modal_test.sh
-
-  # macOS ships bash 3.2, which modal.sh must keep working under.
-  bash-3:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: /bin/bash --version && /bin/bash -n picker.sh && /bin/bash -n modal.sh && /bin/bash -n tests/modal_test.sh
