@@ -11,8 +11,8 @@
 -- How the pieces fit:
 --   lanes_new and lanes_remove open a floating terminal (the modal) over the
 --   current window. The modal starts in the directory of the focused pane and
---   runs modal.sh. The two actions return immediately, because an action can't
---   read input and must finish in 30 seconds.
+--   runs modal.sh with picker.sh. The two actions return immediately, because
+--   an action can't read input and must finish in 30 seconds.
 --
 --   The modal then runs lanes_open or lanes_close. These actions build or
 --   destroy the session.
@@ -22,8 +22,8 @@
 --     - rex.exec and io see only this machine.
 --     - rex.session, rex.block.call and rex.call reach the pane's machine.
 --   So these actions find the repository with the pane's list_dir method. They
---   give the modal the text of modal.sh and of a bundle (see L.bundle), not
---   file paths. A remote host needs no copy of Lanes.
+--   give the modal the text of those scripts and of a bundle (see L.bundle),
+--   not file paths. A remote host needs no copy of Lanes.
 --
 --   The modal runs the bundle with `rex do` on the pane's machine. lanes_open
 --   and lanes_close exist only there. They can use rex.exec, io and the state
@@ -76,7 +76,7 @@ local OPTIONS = { agents = true, bounds = true, layouts = true }
 -- init.lua, and people don't see a log line. So the actions report the problem.
 local setup_error
 
--- The text of modal.sh and of the bundle. Setup reads them.
+-- The text of the modal's scripts and of the bundle. Setup reads them.
 local modal_text, bundle_text
 
 -- The modal layer open in each session, so a second press replaces it.
@@ -422,10 +422,11 @@ local function prepare()
   if layouts == nil then return "fix the setup in init.lua: " .. err end
   local dir = install_dir()
   local init, layout = read_file(dir .. "/init.lua"), read_file(dir .. "/layout.lua")
-  modal_text = read_file(dir .. "/modal.sh")
-  if not (init and layout and modal_text) then
-    return "init.lua, layout.lua or modal.sh is missing from " .. dir
+  local picker, modal = read_file(dir .. "/picker.sh"), read_file(dir .. "/modal.sh")
+  if not (init and layout and picker and modal) then
+    return "init.lua, layout.lua, picker.sh or modal.sh is missing from " .. dir
   end
+  modal_text = picker .. "\n" .. modal
   bundle_text = L.bundle{ init = init, layout = layout, layouts = layouts, path = package.path }
 end
 

@@ -7,7 +7,7 @@ Press a key, type a branch, pick an agent. Lanes creates the worktree with [Work
 - **One session per worktree**, tracked by ID, so renames and Rex server restarts don't break the link.
 - **Per-repo layouts**: tabs, panes and commands (e.g. agent, `npm install` + shell, dev server).
 - **Installed agents only**: Lanes offers the agents Rex supports that are on your `PATH`.
-- **Any branch**: local, remote-only (Lanes creates a tracking branch), or new, built on the branch you're on.
+- **Any branch**: pick a local branch from the list to give it a worktree, type a remote-only one (Lanes creates a tracking branch), or type a new one, built on the branch you're on.
 
 ## Requirements
 
@@ -15,7 +15,7 @@ Press a key, type a branch, pick an agent. Lanes creates the worktree with [Work
 | ----------------------------------------- | ------------------------------- |
 | [Rex](https://www.superlogical.com/)      | Mac app, October 2026 previews¹ |
 | [WorkTrunk](https://worktrunk.dev) (`wt`) | 0.81.0²                         |
-| [fzf](https://github.com/junegunn/fzf)    | 0.74.5                          |
+| [fzf](https://github.com/junegunn/fzf)    | 0.74.5 (needs 0.71.0 or newer)  |
 | [jq](https://jqlang.org)                  | 1.7.1                           |
 | git, bash                                 | bash 3.2 (macOS default)        |
 
@@ -47,7 +47,12 @@ Then run `rex config reload`. With `XDG_CONFIG_HOME` set, use `$XDG_CONFIG_HOME/
 
 Focus a pane in a git repo.
 
-**`lanes_new`** ("Lanes: New Worktree…"): type a branch name and press Return, then pick an agent or "terminal only". An existing worktree opens its session, or any session with a pane in it; any other name creates a worktree, checking out an existing branch or branching from what the focused pane has checked out (its branch, or its commit on a detached HEAD), so running it from a worktree stacks the new branch on top. The modal's header shows the starting point. Return on an empty query opens the highlighted worktree; Alt-Return does so even with text typed.
+**`lanes_new`** ("Lanes: New Worktree…"): the picker lists your worktrees (`●`) and, below them, local branches without a worktree (`○`), most recently committed first. The default branch isn't listed, but typing its name still works. Search matches names only, and worktrees stay above branches while you filter. The line at the bottom says what Return will do.
+
+- Return on an empty query uses the highlighted row. Alt-Return does so even with text typed.
+- Return with text typed uses exactly that name: a worktree opens its session, or any session with a pane in it; a local or remote-only branch gets a new worktree, with its commits untouched; any other name becomes a new branch from what the focused pane has checked out (its branch, or its commit on a detached HEAD), so running it from a worktree stacks the new branch on top.
+
+A new worktree then asks for an agent or "terminal only".
 
 **`lanes_remove`** ("Lanes: Remove Worktree…"): pick a worktree (the preview shows status and recent commits). WorkTrunk removes it, refusing uncommitted changes and keeping unmerged branches, and Lanes closes its session. If you were in that session, Lanes takes you to a session with a pane in the main checkout (whatever branch it's on), else to the next session in the list. It never creates a session here.
 
@@ -106,9 +111,9 @@ Keep layouts that use functions in their own file, loaded with `require`, becaus
 
 ## How it works
 
-Rex actions can't read input and must finish within 30 seconds, so `lanes_new` and `lanes_remove` only open a floating terminal running `modal.sh`. It runs the fzf pickers and `wt`, then runs `lanes_open` / `lanes_close` with `rex do`, which find or build the session and switch the app to it.
+Rex actions can't read input and must finish within 30 seconds, so `lanes_new` and `lanes_remove` only open a floating terminal running `modal.sh` and its picker, `picker.sh`. It runs the fzf pickers and `wt`, then runs `lanes_open` / `lanes_close` with `rex do`, which find or build the session and switch the app to it.
 
-Actions run on the Mac, even when the pane is on a remote host, and `rex.exec` can only start programs on the Mac. So Lanes looks for the repository through the pane, and gives the floating terminal the text of `modal.sh` and of a bundle holding its Lua and your layouts. `lanes_open` and `lanes_close` come from that bundle, so they run on the pane's machine.
+Actions run on the Mac, even when the pane is on a remote host, and `rex.exec` can only start programs on the Mac. So Lanes looks for the repository through the pane, and gives the floating terminal the text of those scripts and of a bundle holding its Lua and your layouts. `lanes_open` and `lanes_close` come from that bundle, so they run on the pane's machine.
 
 Session IDs are stored in `$XDG_STATE_HOME/rex/lanes.json` (default `~/.local/state/rex/lanes.json`) on the machine that has the worktree; stale entries are dropped. Session labels (`repo/branch`) are display-only.
 

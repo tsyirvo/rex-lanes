@@ -145,12 +145,13 @@ local function load_bundle()
   package.preload["lanes.layout"] = function() return require("layout") end
 end
 
-test("the modal is the text of modal.sh, not a path", function()
+test("the modal is the text of picker.sh and modal.sh, not a path", function()
   setup({})
   eq(run("lanes_new"), nil)
   local command = modal_command()
   eq(command[1], "bash")
   eq(command[2], "-c")
+  has(command[3], "The new-worktree picker")
   has(command[3], "The worktree modal")
   eq(command[4], "lanes")
   eq(command[5], "new")
@@ -267,7 +268,7 @@ test("a missing install file is reported once, with one prefix", function()
   local source = f:read("*a")
   f:close()
   assert(loadstring(source, "@/nonexistent/init.lua"))("lanes").setup({})
-  eq(run("lanes_new"), "lanes: init.lua, layout.lua or modal.sh is missing from /nonexistent")
+  eq(run("lanes_new"), "lanes: init.lua, layout.lua, picker.sh or modal.sh is missing from /nonexistent")
   eq(#state.layers, 0)
 end)
 

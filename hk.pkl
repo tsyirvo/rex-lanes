@@ -6,11 +6,11 @@ hooks {
     steps {
       ["gitleaks"] = Builtins.gitleaks
       ["lint"] {
-        glob = "modal.sh"
+        glob = List("*.sh", "tests/*.sh")
         check = "mise run lint"
       }
       ["test"] {
-        glob = List("*.lua", "tests/**")
+        glob = List("*.lua", "*.sh", "tests/**")
         check = "mise run test"
       }
     }
