@@ -1,16 +1,18 @@
 [tools]
+fzf = "0.74.5"
 gitleaks = "8.30.1"
 hk = "2.10.0"
 lua = "5.1.5"
 shellcheck = "0.11.0"
+worktrunk = "0.81.0"
 
 [tasks.test]
-description = "Run the Lua tests"
-run = ["lua tests/layout_test.lua", "lua tests/init_test.lua"]
+description = "Run the tests, the modal's with the bash macOS ships"
+run = ["lua tests/layout_test.lua", "lua tests/init_test.lua", "/bin/bash tests/modal_test.sh"]
 
 [tasks.lint]
-description = "Check modal.sh with shellcheck and with the bash macOS ships"
-run = ["shellcheck modal.sh", "/bin/bash -n modal.sh"]
+description = "Check the shell scripts with shellcheck and with the bash macOS ships"
+run = ["shellcheck picker.sh modal.sh tests/modal_test.sh", "/bin/bash -n picker.sh", "/bin/bash -n modal.sh", "/bin/bash -n tests/modal_test.sh"]
 
 [tasks.check]
 description = "Lint and test"

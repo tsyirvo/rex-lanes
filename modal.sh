@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# The worktree modal. init.lua gives the text of this file to bash -c, so a
-# remote host needs no copy. The floating terminal starts in the repo:
+# The worktree modal. init.lua gives the text of picker.sh and this file to
+# bash -c, so a remote host needs no copy. The floating terminal starts in the
+# repo:
 #
-#   bash -c "$(cat modal.sh)" lanes MODE CLIENT BUNDLE [ARG...]
+#   bash -c "$(cat picker.sh modal.sh)" lanes MODE CLIENT BUNDLE [ARG...]
 #
 #   new CLIENT BUNDLE rex             list worktrees, type a branch name, pick an
 #   new CLIENT BUNDLE list AGENT...   agent, create or open its session
@@ -31,7 +32,7 @@ done
 rex client ls >/dev/null 2>&1 || hold "The rex on PATH ($(command -v rex)) can't reach Rex. Is it the Rex CLI?"
 
 # shellcheck disable=SC2054 # --with-nth=1,2 is one argument
-FZF_OPTS=(--reverse --info=inline --height=100% --border=none --delimiter=$'\t' --with-nth=1,2)
+FZF_OPTS=("${FZF_LOOK[@]}" --delimiter=$'\t' --with-nth=1,2)
 
 # The `wt list --format=json` layout this script reads.
 WT_SCHEMA=2
@@ -41,7 +42,8 @@ rexdo() { rex ${CLIENT:+-C "$CLIENT"} "do" - --action "$@" <<<"$BUNDLE"; }
 
 # Reads the repo with one `wt list`. Sets ITEMS, one line per worktree: branch,
 # path (with ~), "main" or "", absolute path. Sets MAIN to the main checkout's
-# path, and REPO to the forge's name for the repo ("" without a forge).
+# path, REPO to the forge's name for the repo ("" without a forge), and
+# DEFAULT_BRANCH to the repo's default branch ("" if wt can't tell).
 load() {
   local json
   json=$(command wt list --format=json 2>/dev/null) || hold "wt list failed"
@@ -55,6 +57,7 @@ load() {
        (if .worktree.main then "main" else "" end), .worktree.path]
     | @tsv' <<<"$json")
   REPO=$(jq -r '.repo.forge.name // empty' <<<"$json")
+  DEFAULT_BRANCH=$(jq -r '.repo.default_branch // empty' <<<"$json")
   MAIN=$(awk -F'\t' '$3 == "main" { print $4; exit }' <<<"$ITEMS")
 }
 
@@ -99,7 +102,9 @@ If the session is in the sidebar, turn on Rex → Settings → Rex Server → Re
 }
 
 new() {
-  local out query key sel name path agent base
+  local incompatibility out name path kind agent base
+  incompatibility=$(picker_incompatibility)
+  [[ -z $incompatibility ]] || hold "$incompatibility"
   load
 
   # A new branch builds on what the focused pane has checked out: its branch,
@@ -107,22 +112,7 @@ new() {
   base=$(git branch --show-current)
   [[ -n $base ]] || base=$(git rev-parse HEAD) || hold "Can't tell which commit to branch from"
 
-  # Enter takes the typed name exactly (existing → open, new → create); with
-  # nothing typed it opens the highlighted worktree. alt-enter opens the
-  # highlighted one even when something is typed.
-  out=$(fzf "${FZF_OPTS[@]}" --print-query --expect=alt-enter \
-      --prompt='new worktree ❯ ' \
-      --header="New branches start from $base"$'\nType a branch name · ↵ create (or open if it exists) · alt-↵ open highlighted · esc cancel' \
-      <<<"$ITEMS")
-  [[ $? -gt 1 ]] && exit 0
-  { IFS= read -r query; IFS= read -r key; IFS= read -r sel; } <<<"$out"
-
-  if [[ $key == alt-enter && -n $sel ]] || [[ -z $query && -n $sel ]]; then
-    name=${sel%%$'\t'*}
-  else
-    name=$query
-  fi
-  [[ -z $name ]] && exit 0
+  name=$(pick_branch "$base" "$ITEMS" "$DEFAULT_BRANCH") || exit 0
 
   path=$(path_of "$name")
   if [[ -n $path ]]; then
@@ -132,16 +122,14 @@ new() {
     return
   fi
 
-  git check-ref-format --branch "$name" >/dev/null 2>&1 || hold "Not a valid branch name: $name"
+  kind=$(branch_kind "$name")
+  [[ $kind == invalid ]] && hold "Not a valid branch name: $name"
   agent=$(pick_agent "$name") || exit 0
 
-  # A branch that exists here or on a remote is checked out, and wt makes a
-  # tracking branch for a remote one. Any other name is a new branch.
+  # wt checks out a branch that exists here or on a remote, and makes a
+  # tracking branch for a remote one.
   local switch_args=("$name" --no-cd --format=json)
-  if ! git show-ref --quiet --verify "refs/heads/$name" \
-    && [[ -z $(git for-each-ref --count=1 --format=x "refs/remotes/*/$name") ]]; then
-    switch_args+=(--create --base "$base")
-  fi
+  [[ $kind == new ]] && switch_args+=(--create --base "$base")
 
   # Hooks run here, where their output is visible: wt prints them on stderr
   # and only the JSON result on stdout. --no-cd: this shell is not the one

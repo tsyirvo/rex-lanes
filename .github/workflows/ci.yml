@@ -13,11 +13,24 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y lua5.1 shellcheck
       - run: lua5.1 tests/layout_test.lua
       - run: lua5.1 tests/init_test.lua
-      - run: shellcheck modal.sh
+      - run: shellcheck picker.sh modal.sh tests/modal_test.sh
+
+  modal:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install_args: fzf worktrunk
+      - run: /bin/bash tests/modal_test.sh
 
   # macOS ships bash 3.2, which modal.sh must keep working under.
   bash-3:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: /bin/bash --version && /bin/bash -n modal.sh
+      - run: /bin/bash --version && /bin/bash -n picker.sh && /bin/bash -n modal.sh && /bin/bash -n tests/modal_test.sh
