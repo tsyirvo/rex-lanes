@@ -7,7 +7,7 @@ Press a key, type a branch, pick an agent. Lanes creates the worktree with [Work
 - **One session per worktree**, tracked by ID, so renames and Rex server restarts don't break the link.
 - **Per-repo layouts**: tabs, panes and commands (e.g. agent, `npm install` + shell, dev server).
 - **Installed agents only**: Lanes offers the agents Rex supports that are on your `PATH`.
-- **Any branch**: local, remote-only (Lanes creates a tracking branch), or new.
+- **Any branch**: local, remote-only (Lanes creates a tracking branch), or new, built on the branch you're on.
 
 ## Requirements
 
@@ -45,7 +45,7 @@ Then run `rex config reload`. With `XDG_CONFIG_HOME` set, use `$XDG_CONFIG_HOME/
 
 Focus a pane in a git repo.
 
-**`lanes_new`** ("Lanes: New Worktree…"): type a branch name and press Return, then pick an agent or "terminal only". An existing worktree opens its session; any other name creates a worktree, checking out an existing branch or branching from the default branch. Return on an empty query opens the highlighted worktree; Alt-Return does so even with text typed.
+**`lanes_new`** ("Lanes: New Worktree…"): type a branch name and press Return, then pick an agent or "terminal only". An existing worktree opens its session; any other name creates a worktree, checking out an existing branch or branching from what the focused pane has checked out (its branch, or its commit on a detached HEAD), so running it from a worktree stacks the new branch on top. The modal's header shows the starting point. Return on an empty query opens the highlighted worktree; Alt-Return does so even with text typed.
 
 **`lanes_remove`** ("Lanes: Remove Worktree…"): pick a worktree (the preview shows status and recent commits). WorkTrunk removes it, refusing uncommitted changes and keeping unmerged branches, and Lanes closes its session.
 
