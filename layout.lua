@@ -65,6 +65,10 @@ function L.parent_of(dir)
   return parent == "" and "/" or parent
 end
 
+function L.is_within(dir, root)
+  return dir == root or dir:sub(1, #root + 1) == root .. "/"
+end
+
 -- Sending Lanes to the machine of a pane. See "How the pieces fit" in init.lua.
 
 -- Converts a value to Lua source. If the value contains a function, returns nil

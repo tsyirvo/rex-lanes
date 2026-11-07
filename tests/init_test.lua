@@ -54,6 +54,7 @@ local state
 local function fake_rex()
   state = {
     actions = {}, logs = {}, layers = {}, created = {}, queued = {},
+    sessions = {}, blocks = {}, panes = {}, destroyed = {},
     cwd = "/srv/repo/sub", pwd = nil, git = { ["/srv/repo"] = true },
     exec = function(argv) error("rex.exec on the wrong machine: " .. table.concat(argv, " "), 0) end,
   }
@@ -67,11 +68,19 @@ local function fake_rex()
       vertical = function(r, a, b) return { r, a, b } end,
     },
     json = {
-      decode = function() return {} end,
-      encode = function() return "{}" end,
+      decode = function() return state.saved or {} end,
+      encode = function(value)
+        state.saved = value
+        return "{}"
+      end,
     },
     block = {
       call = function(_, method, args)
+        local pane = state.panes[args.block_id]
+        if pane then
+          if method == "process" then return { foreground = { cwd = pane.cwd } } end
+          if method == "pwd" then return { pwd = pane.pwd } end
+        end
         if method == "process" then
           return state.cwd and { child = { cwd = state.cwd } } or {}
         end
@@ -92,7 +101,12 @@ local function fake_rex()
       close_layer = function() return {} end,
     },
     call = function(method, args)
-      if method == "session.list" then return { sessions = {} } end
+      if method == "session.list" then return { sessions = state.sessions } end
+      if method == "session.list_blocks" then return { blocks = state.blocks[args.session_id] or {} } end
+      if method == "session.destroy" then
+        state.destroyed[#state.destroyed + 1] = args.session_id
+        state.saved_at_destroy = state.saved
+      end
       if method == "session.create" then
         state.created[#state.created + 1] = args
         return { session_id = "s1", initial_windows = { { window_id = "w1" } } }
@@ -255,6 +269,149 @@ test("a missing install file is reported once, with one prefix", function()
   assert(loadstring(source, "@/nonexistent/init.lua"))("lanes").setup({})
   eq(run("lanes_new"), "lanes: init.lua, layout.lua or modal.sh is missing from /nonexistent")
   eq(#state.layers, 0)
+end)
+
+-- Removing a worktree. /srv/repo is the main checkout. /srv/repo.feat, the
+-- worktree, is already removed, so only its session's panes know about it.
+
+local MAIN, WORKTREE = "/srv/repo", "/srv/repo.feat"
+
+-- Each session is { id, pane, pane... }, and each pane is { cwd = ..., pwd = ... }.
+-- A cwd's toplevel is the cwd itself, or the part before /mobile.
+local function session_actions(sessions)
+  setup({})
+  eq(run("lanes_new"), nil)
+  load_bundle()
+  for _, spec in ipairs(sessions) do
+    local blocks = { { block_id = "modal-" .. spec[1], creator_name = "other" } }
+    for i = 2, #spec do
+      local block_id = spec[1] .. "-" .. i
+      blocks[#blocks + 1] = { block_id = block_id, creator_name = "com.superlogical.terminal" }
+      state.panes[block_id] = spec[i]
+    end
+    state.sessions[#state.sessions + 1] = { session_id = spec[1], label = spec[1] }
+    state.blocks[spec[1]] = blocks
+  end
+  state.exec = function(argv)
+    if argv[1] ~= "git" then return { ok = true, stdout = "" } end
+    local dir = argv[3]
+    if dir:find("/.git/", 1, true) then return { ok = false, stdout = "" } end
+    return { ok = true, stdout = (dir:gsub("/mobile$", "")) .. "\n" }
+  end
+end
+
+local function track(path, session_id)
+  state.saved = state.saved or {}
+  state.saved[path] = session_id
+  local f = assert(io.open(STATE_HOME .. "/rex/lanes.json", "w"))
+  f:write("{}")
+  f:close()
+end
+
+local function close(from)
+  return state.actions.lanes_close.run({ session_id = from }, { path = WORKTREE, branch = "feat", main = MAIN })
+end
+
+local function shown()
+  local last = state.queued[#state.queued]
+  return last and last[2].session_id
+end
+
+local IN_WORKTREE = { cwd = MAIN .. "/.git/wt/trash/feat", pwd = "file://host" .. WORKTREE }
+
+test("removing goes to a session on the main checkout that Lanes didn't create", function()
+  session_actions({
+    { "other", { cwd = "/srv/other" } },
+    { "wt", IN_WORKTREE },
+    { "main", { cwd = MAIN } },
+  })
+  track(WORKTREE, "wt")
+  local out = close("wt")
+  eq(shown(), "main")
+  eq(#state.created, 0, "sessions created")
+  eq(state.destroyed[1], "wt")
+  eq(out.closed, true)
+end)
+
+test("a pane in a subfolder of the main checkout counts", function()
+  session_actions({ { "wt", IN_WORKTREE }, { "main", { cwd = MAIN .. "/mobile" } } })
+  track(WORKTREE, "wt")
+  close("wt")
+  eq(shown(), "main")
+end)
+
+test("the first session on the main checkout wins", function()
+  session_actions({ { "wt", IN_WORKTREE }, { "first", { cwd = MAIN } }, { "second", { cwd = MAIN } } })
+  track(WORKTREE, "wt")
+  close("wt")
+  eq(shown(), "first")
+end)
+
+test("without a session on the main checkout, the next session is shown", function()
+  session_actions({ { "a", { cwd = "/srv/a" } }, { "wt", IN_WORKTREE }, { "b", { cwd = MAIN .. ".other" } } })
+  track(WORKTREE, "wt")
+  close("wt")
+  eq(shown(), "b")
+  eq(#state.created, 0, "sessions created")
+end)
+
+test("a pane in wt's trash isn't on the main checkout", function()
+  session_actions({ { "wt", IN_WORKTREE }, { "stale", IN_WORKTREE }, { "main", { cwd = MAIN } } })
+  track(WORKTREE, "wt")
+  close("wt")
+  eq(shown(), "main")
+end)
+
+test("the next session wraps around to the first", function()
+  session_actions({ { "a", { cwd = "/srv/a" } }, { "wt", IN_WORKTREE } })
+  track(WORKTREE, "wt")
+  close("wt")
+  eq(shown(), "a")
+end)
+
+test("the only session closes without moving anywhere", function()
+  session_actions({ { "wt", IN_WORKTREE } })
+  track(WORKTREE, "wt")
+  close("wt")
+  eq(#state.queued, 0, "selects")
+  eq(state.destroyed[1], "wt")
+end)
+
+test("removing from another session stays there", function()
+  session_actions({ { "here", { cwd = "/srv/a" } }, { "wt", IN_WORKTREE }, { "main", { cwd = MAIN } } })
+  track(WORKTREE, "wt")
+  close("here")
+  eq(#state.queued, 0, "selects")
+  eq(state.destroyed[1], "wt")
+end)
+
+test("the state entry is gone before the session is destroyed", function()
+  session_actions({ { "wt", IN_WORKTREE }, { "main", { cwd = MAIN } } })
+  track(WORKTREE, "wt")
+  close("wt")
+  eq(state.saved_at_destroy[WORKTREE], nil)
+end)
+
+test("an untracked session with panes only in the worktree is closed", function()
+  session_actions({ { "wt", IN_WORKTREE, { cwd = "x", pwd = WORKTREE .. "/mobile" } }, { "main", { cwd = MAIN } } })
+  eq(close("wt").closed, true)
+  eq(shown(), "main")
+  eq(state.destroyed[1], "wt")
+end)
+
+test("an untracked session with a pane elsewhere is left alone", function()
+  session_actions({ { "mixed", IN_WORKTREE, { cwd = "/srv/a", pwd = "/srv/a" } }, { "main", { cwd = MAIN } } })
+  eq(close("mixed").closed, false)
+  eq(#state.queued, 0, "selects")
+  eq(#state.destroyed, 0, "destroyed")
+end)
+
+test("opening a checkout goes to a session on it, without asking for an agent", function()
+  session_actions({ { "main", { cwd = MAIN .. "/mobile" } } })
+  local out = state.actions.lanes_open.run({ session_id = "main" }, { path = MAIN, branch = "b", main = MAIN })
+  eq(out.session_id, "main")
+  eq(out.created, false)
+  eq(#state.created, 0, "sessions created")
 end)
 
 os.execute("rm -rf '" .. STATE_HOME .. "'")

@@ -47,9 +47,9 @@ Then run `rex config reload`. With `XDG_CONFIG_HOME` set, use `$XDG_CONFIG_HOME/
 
 Focus a pane in a git repo.
 
-**`lanes_new`** ("Lanes: New Worktree…"): type a branch name and press Return, then pick an agent or "terminal only". An existing worktree opens its session; any other name creates a worktree, checking out an existing branch or branching from what the focused pane has checked out (its branch, or its commit on a detached HEAD), so running it from a worktree stacks the new branch on top. The modal's header shows the starting point. Return on an empty query opens the highlighted worktree; Alt-Return does so even with text typed.
+**`lanes_new`** ("Lanes: New Worktree…"): type a branch name and press Return, then pick an agent or "terminal only". An existing worktree opens its session, or any session with a pane in it; any other name creates a worktree, checking out an existing branch or branching from what the focused pane has checked out (its branch, or its commit on a detached HEAD), so running it from a worktree stacks the new branch on top. The modal's header shows the starting point. Return on an empty query opens the highlighted worktree; Alt-Return does so even with text typed.
 
-**`lanes_remove`** ("Lanes: Remove Worktree…"): pick a worktree (the preview shows status and recent commits). WorkTrunk removes it, refusing uncommitted changes and keeping unmerged branches, and Lanes closes its session.
+**`lanes_remove`** ("Lanes: Remove Worktree…"): pick a worktree (the preview shows status and recent commits). WorkTrunk removes it, refusing uncommitted changes and keeping unmerged branches, and Lanes closes its session. If you were in that session, Lanes takes you to a session with a pane in the main checkout (whatever branch it's on), else to the next session in the list. It never creates a session here.
 
 ## Configure
 

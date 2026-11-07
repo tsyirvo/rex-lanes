@@ -121,18 +121,24 @@ local function git(dir, ...)
   return nil
 end
 
--- The directory the focused terminal is in: its foreground program's, else its
+-- The directory the shell last reported, which stays the same if that directory
+-- moves.
+local function reported_cwd(block_id, session_id)
+  local pwd = rex.block.call(TERMINAL, "pwd", { block_id = block_id, session_id = session_id })
+  return pwd and L.path_of(pwd.pwd)
+end
+
+-- The directory a terminal is in: its foreground program's, else its
 -- shell's, else what it last reported. nil rather than a guess, since acting on
 -- the wrong repo is worse than refusing.
-local function focused_cwd(block_id)
+local function pane_cwd(block_id, session_id)
   if not block_id then return nil end
-  local p = rex.block.call(TERMINAL, "process", { block_id = block_id })
+  local p = rex.block.call(TERMINAL, "process", { block_id = block_id, session_id = session_id })
   if p then
     local cwd = (p.foreground or {}).cwd or (p.child or {}).cwd
     if cwd and cwd ~= "" then return cwd end
   end
-  local pwd = rex.block.call(TERMINAL, "pwd", { block_id = block_id })
-  return pwd and L.path_of(pwd.pwd)
+  return reported_cwd(block_id, session_id)
 end
 
 -- Tells if dir is in a git repository, on the machine of the block. The search
@@ -184,11 +190,15 @@ local function remember(path, session_id)
   write_state(state)
 end
 
+local function list_sessions()
+  return check(rex.call("session.list")).sessions or {}
+end
+
 -- The session kept for a worktree, if it still exists. Entries for sessions
 -- that are gone, closed by hand or discarded with the server, are dropped.
 local function find_session(wt)
   local live = {}
-  for _, s in ipairs(check(rex.call("session.list")).sessions or {}) do
+  for _, s in ipairs(list_sessions()) do
     live[s.session_id] = true
   end
   local state, stale = read_state(), false
@@ -200,6 +210,63 @@ local function find_session(wt)
   end
   if stale then write_state(state) end
   return state[wt.path]
+end
+
+-- A connection only reaches sessions it is attached to.
+local function terminal_blocks(session_id)
+  check(rex.call("session.attach", { session_id = session_id }))
+  local ids = {}
+  for _, block in ipairs(check(rex.call("session.list_blocks", { session_id = session_id })).blocks or {}) do
+    if block.creator_name == TERMINAL then ids[#ids + 1] = block.block_id end
+  end
+  return ids
+end
+
+-- The first session with a pane in the checkout at path, except the given one.
+-- This compares git toplevels, not path prefixes: a worktree can be nested in
+-- the main checkout, and wt moves a removed worktree into the main checkout's
+-- .git, with its panes still in it.
+local function session_on(path, except)
+  local checkout = git(path, "rev-parse", "--show-toplevel")
+  if checkout == nil then return nil end
+  for _, s in ipairs(list_sessions()) do
+    if s.session_id ~= except then
+      for _, block_id in ipairs(terminal_blocks(s.session_id)) do
+        local cwd = pane_cwd(block_id, s.session_id)
+        if cwd and git(cwd, "rev-parse", "--show-toplevel") == checkout then
+          return s.session_id
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- Tells if the session only has panes in the directory. It reads the reported
+-- directories, because the panes' processes are in wt's trash by now. Terminals
+-- that report nothing, such as the modal, don't count.
+local function only_in(session_id, path)
+  local found = false
+  for _, block_id in ipairs(terminal_blocks(session_id)) do
+    local cwd = reported_cwd(block_id, session_id)
+    if cwd then
+      if not L.is_within(cwd, path) then return false end
+      found = true
+    end
+  end
+  return found
+end
+
+-- The session after the given one, wrapping around. nil if it is the only one.
+local function next_session(session_id)
+  local sessions = list_sessions()
+  for i, s in ipairs(sessions) do
+    if s.session_id == session_id then
+      local following = sessions[i % #sessions + 1].session_id
+      return following ~= session_id and following or nil
+    end
+  end
+  return nil
 end
 
 local function create_session(wt, agent)
@@ -224,7 +291,7 @@ end
 -- as needs_agent instead of being built, so the modal can ask. "" is no agent.
 local function open_wt(wt, agent)
   if not is_dir(wt.path) then fail("not a directory: " .. wt.path) end
-  local session_id, window_id = find_session(wt), nil
+  local session_id, window_id = find_session(wt) or session_on(wt.path), nil
   local created = session_id == nil
   if created then
     if agent == nil then return { needs_agent = true } end
@@ -242,17 +309,23 @@ function M.open(_, path, branch, main, repo, agent)
 end
 
 -- Close the session of a removed worktree. When the modal ran inside that very
--- session, move to the main checkout's session first.
+-- session, move to a session on the main checkout, else to the next session.
 function M.close(ctx, path, branch, main, repo)
   local session_id = find_session(L.describe(path, branch, main, repo))
-  if session_id == nil then return { closed = false } end
-  if session_id == ctx.session_id and is_dir(main) then
-    open_wt(L.describe(main, git(main, "branch", "--show-current") or "", main, repo), "")
+  if session_id == nil and ctx.session_id and only_in(ctx.session_id, path) then
+    session_id = ctx.session_id
   end
-  -- A connection only reaches sessions it is attached to.
+  if session_id == nil then return { closed = false } end
+  if session_id == ctx.session_id then
+    local target = find_session(L.describe(main, "", main, repo))
+      or session_on(main, session_id)
+      or next_session(session_id)
+    if target then show(target) end
+  end
+  -- Destroying the session that holds the modal also ends this script.
+  remember(path, nil)
   check(rex.call("session.attach", { session_id = session_id }))
   check(rex.call("session.destroy", { session_id = session_id }))
-  remember(path, nil)
   return { closed = true, session_id = session_id }
 end
 
@@ -266,7 +339,7 @@ end
 
 local function open_modal(ctx, mode)
   if setup_error then fail(setup_error) end
-  local cwd = focused_cwd(ctx.block_id)
+  local cwd = pane_cwd(ctx.block_id)
   if cwd == nil then fail("can't tell which repo the focused pane is in") end
   if not in_repo(ctx.block_id, cwd) then fail("not a git repository: " .. cwd) end
 
