@@ -2,6 +2,9 @@
 -- and panes that layout makes, and the session's label. Nothing here calls
 -- Rex. The layout builders come in as an argument (rex.layout in Rex), so the
 -- tests can run this file under plain Lua 5.1.
+--
+-- For the same reason, this file also has the path helpers and the bundle
+-- builder that init.lua uses.
 
 local L = {}
 
@@ -44,6 +47,55 @@ function L.label(wt)
   local label = wt.repo .. "/" .. wt.branch
   if #label <= 128 then return label end
   return (label:sub(1, 128):gsub("[\192-\255][\128-\191]*$", ""))
+end
+
+-- Converts the terminal's pwd value to a path. A shell that uses OSC 7 reports
+-- a file://host/path URL, with a percent-encoded path.
+function L.path_of(pwd)
+  if pwd == nil or pwd == "" then return nil end
+  local path = pwd:match("^file://[^/]*(/.*)$")
+  if path == nil then return pwd end
+  return (path:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+end
+
+-- The parent directory of dir. nil at the root.
+function L.parent_of(dir)
+  local parent = dir:gsub("/+$", ""):match("^(.*)/[^/]*$")
+  if parent == nil then return nil end
+  return parent == "" and "/" or parent
+end
+
+-- Sending Lanes to the machine of a pane. See "How the pieces fit" in init.lua.
+
+-- Converts a value to Lua source. If the value contains a function, returns nil
+-- and the place of the function.
+function L.serialize(value, where)
+  local kind = type(value)
+  if kind == "string" then return ("%q"):format(value) end
+  if kind == "number" or kind == "boolean" then return tostring(value) end
+  if kind ~= "table" then return nil, where end
+  local fields = {}
+  for k, v in pairs(value) do
+    local text, place = L.serialize(v, where .. "." .. tostring(k))
+    if text == nil then return nil, place end
+    fields[#fields + 1] = "[" .. L.serialize(k, where) .. "]=" .. text
+  end
+  return "{" .. table.concat(fields, ",") .. "}"
+end
+
+-- Makes the Lua script that the modal gives to `rex do`. The script defines
+-- lanes_open and lanes_close on the machine that runs it. The fields of parts:
+--   init, layout: the source of init.lua and layout.lua.
+--   layouts: the source of the layouts.
+--   path: the package.path of the config. A layouts file can then require the
+--     files next to it, if they are on that machine.
+function L.bundle(parts)
+  return table.concat({
+    ("package.path = %q .. package.path"):format(parts.path .. ";"),
+    ('package.preload["lanes.layout"] = assert(loadstring(%q, "=lanes/layout.lua"))'):format(parts.layout),
+    ('local lanes = assert(loadstring(%q, "=lanes/init.lua"))("lanes")'):format(parts.init),
+    ('lanes.session_actions(assert(loadstring(%q, "=lanes layouts"))())'):format(parts.layouts),
+  }, "\n")
 end
 
 -- Checking layouts. Each mistake names its place, such as

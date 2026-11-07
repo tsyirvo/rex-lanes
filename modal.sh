@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 #
-# The worktree modal. init.lua runs it in a floating terminal whose
-# working directory is the repo to act on.
+# The worktree modal. init.lua gives the text of this file to bash -c, so a
+# remote host needs no copy. The floating terminal starts in the repo:
 #
-#   modal.sh new CLIENT rex             list worktrees, type a branch name, pick an
-#   modal.sh new CLIENT list AGENT...   agent, create or open its session
-#   modal.sh remove CLIENT              pick a worktree, `wt remove` it, close its session
+#   bash -c "$(cat modal.sh)" lanes MODE CLIENT BUNDLE [ARG...]
 #
-# CLIENT is the Rex client that opened the modal, "" when unknown. Results go
-# back to it with `rex -C CLIENT do lanes_open` / `lanes_close`. The agents
-# offered are the ones Rex supports (rex) or the given commands (list), each
-# only when its program is on PATH, then "terminal only".
+#   new CLIENT BUNDLE rex             list worktrees, type a branch name, pick an
+#   new CLIENT BUNDLE list AGENT...   agent, create or open its session
+#   remove CLIENT BUNDLE              pick a worktree, `wt remove` it, close its session
+#
+# CLIENT is the Rex client that opened the modal, or "" if it is not known.
+# BUNDLE is Lua that defines lanes_open and lanes_close (see init.lua). They run
+# on this machine with `rex do`, and they switch that client to the session.
+#
+# The agent list has the agents that Rex supports (rex) or the given commands
+# (list), then "terminal only". An agent shows only if its program is on PATH.
 #
 # Kept to bash 3.2, the one macOS ships: an empty array is never expanded.
 
@@ -22,18 +26,18 @@ hold() { printf '\n\033[31m%s\033[0m\n\033[2mpress any key to close\033[0m' "$*"
 for tool in wt fzf jq git rex; do
   command -v "$tool" >/dev/null 2>&1 || hold "$tool not found on PATH"
 done
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || hold "not a git repository: $PWD"
+# Linux distributions have a different program with the name rex, a Perl tool.
+# Find this problem here, before the script makes a worktree.
+rex client ls >/dev/null 2>&1 || hold "The rex on PATH ($(command -v rex)) can't reach Rex. Is it the Rex CLI?"
 
 # shellcheck disable=SC2054 # --with-nth=1,2 is one argument
 FZF_OPTS=(--reverse --info=inline --height=100% --border=none --delimiter=$'\t' --with-nth=1,2)
-CLIENT=
-AGENT_SOURCE=rex
-AGENT_LIST=()
 
 # The `wt list --format=json` layout this script reads.
 WT_SCHEMA=2
 
-rexdo() { rex ${CLIENT:+-C "$CLIENT"} "do" "$@"; }
+# Runs an action from the bundle.
+rexdo() { rex ${CLIENT:+-C "$CLIENT"} "do" - --action "$@" <<<"$BUNDLE"; }
 
 # Reads the repo with one `wt list`. Sets ITEMS, one line per worktree: branch,
 # path (with ~), "main" or "", absolute path. Sets MAIN to the main checkout's
@@ -180,12 +184,18 @@ remove() {
     || hold "Removed $name, but could not close its Rex session"
 }
 
+CLIENT=${2-} BUNDLE=${3-}
+
+# A remote server knows the app by a different ID. Without -C, Rex uses the only
+# connected app.
+if [[ -n $CLIENT ]] && ! rex client inspect "$CLIENT" >/dev/null 2>&1; then CLIENT=; fi
+
 case ${1-} in
   new)
-    CLIENT=${2-} AGENT_SOURCE=${3-rex}
-    shift $(($# < 3 ? $# : 3))
+    AGENT_SOURCE=${4-rex}
+    shift $(($# < 4 ? $# : 4))
     AGENT_LIST=("$@")
     new ;;
-  remove) CLIENT=${2-}; remove ;;
-  *)      hold "usage: modal.sh new CLIENT rex | new CLIENT list AGENT... | remove CLIENT" ;;
+  remove) remove ;;
+  *) hold "usage: new CLIENT BUNDLE rex | new CLIENT BUNDLE list AGENT... | remove CLIENT BUNDLE" ;;
 esac

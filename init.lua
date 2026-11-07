@@ -9,13 +9,31 @@
 --   rex.bind("cmd+alt+backspace", "lanes_remove")
 --
 -- How the pieces fit:
---   lanes_new / lanes_remove open a floating terminal (the modal) over the
---   current window, in the repo of the focused pane, running modal.sh. They
---   return at once: an action can't read input, and it has 30 seconds to
---   finish. The modal hands its result back with `rex do` to lanes_open /
---   lanes_close, which build or destroy the session. The modal is given the
---   client that opened it and passes it to `rex -C`, so the switch happens in
---   that app and not in another connected one.
+--   lanes_new and lanes_remove open a floating terminal (the modal) over the
+--   current window. The modal starts in the directory of the focused pane and
+--   runs modal.sh. The two actions return immediately, because an action can't
+--   read input and must finish in 30 seconds.
+--
+--   The modal then runs lanes_open or lanes_close. These actions build or
+--   destroy the session.
+--
+--   lanes_new and lanes_remove run on this machine, but the focused pane can be
+--   on a remote host:
+--     - rex.exec and io see only this machine.
+--     - rex.session, rex.block.call and rex.call reach the pane's machine.
+--   So these actions find the repository with the pane's list_dir method. They
+--   give the modal the text of modal.sh and of a bundle (see L.bundle), not
+--   file paths. A remote host needs no copy of Lanes.
+--
+--   The modal runs the bundle with `rex do` on the pane's machine. lanes_open
+--   and lanes_close exist only there. They can use rex.exec, io and the state
+--   file, because the worktree and its sessions are on that machine. Each
+--   machine has its own state file.
+--
+--   The modal gets the client that opened it and passes it to `rex -C`. The
+--   switch then occurs in that app, not in another connected app. A remote
+--   server knows that app by a different ID. In that case the modal omits -C,
+--   and Rex uses the only connected app.
 --
 --   Switching the app to another session from `rex do` needs Remote Control
 --   (Rex → Settings → Rex Server). Without it the session is still created,
@@ -54,9 +72,12 @@ M.options = {
 
 local OPTIONS = { agents = true, bounds = true, layouts = true }
 
--- The first mistake setup found in the options. Raising it at load would stop
--- the rest of init.lua, and a log line goes unseen, so the actions report it.
-local config_error
+-- The first problem that setup found. An error at load would stop the rest of
+-- init.lua, and people don't see a log line. So the actions report the problem.
+local setup_error
+
+-- The text of modal.sh and of the bundle. Setup reads them.
+local modal_text, bundle_text
 
 -- The modal layer open in each session, so a second press replaces it.
 local modals = {}
@@ -74,11 +95,19 @@ local function trim(s)
   return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-local function script_path()
+-- The directory that contains Lanes.
+local function install_dir()
   local src = (debug.getinfo(1, "S").source or ""):gsub("^@", "")
-  local dir = src:match("^(/.*)/[^/]*$")
+  return src:match("^(/.*)/[^/]*$")
     or (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/rex/lanes"
-  return dir .. "/modal.sh"
+end
+
+local function read_file(path)
+  local f = io.open(path, "r")
+  if f == nil then return nil end
+  local text = f:read("*a")
+  f:close()
+  return text
 end
 
 local function is_dir(path)
@@ -92,12 +121,6 @@ local function git(dir, ...)
   return nil
 end
 
--- The main checkout of the repo that dir belongs to.
-local function main_of(dir)
-  local common = git(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
-  return common and (common:gsub("/%.git/?$", "")) or nil
-end
-
 -- The directory the focused terminal is in: its foreground program's, else its
 -- shell's, else what it last reported. nil rather than a guess, since acting on
 -- the wrong repo is worse than refusing.
@@ -109,7 +132,27 @@ local function focused_cwd(block_id)
     if cwd and cwd ~= "" then return cwd end
   end
   local pwd = rex.block.call(TERMINAL, "pwd", { block_id = block_id })
-  return pwd and pwd.pwd ~= "" and pwd.pwd or nil
+  return pwd and L.path_of(pwd.pwd)
+end
+
+-- Tells if dir is in a git repository, on the machine of the block. The search
+-- starts at dir and goes up to the root. A directory that the block can't read
+-- has no entries, so the search continues above it. A .git entry is a directory,
+-- or a file in a worktree or a submodule.
+local function in_repo(block_id, dir)
+  while dir do
+    local listing, err = rex.block.call(TERMINAL, "list_dir", {
+      block_id = block_id, path = dir, prefix = ".git", files = true,
+    })
+    if listing == nil then
+      fail("can't look for a git repository in " .. dir .. ": " .. tostring(err))
+    end
+    for _, entry in ipairs(listing.entries or {}) do
+      if entry.name == ".git" then return true end
+    end
+    dir = L.parent_of(dir)
+  end
+  return false
 end
 
 -- The state file: { [worktree path] = session_id }.
@@ -119,10 +162,8 @@ local function state_path()
 end
 
 local function read_state()
-  local f = io.open(state_path(), "r")
-  if f == nil then return {} end
-  local state = rex.json.decode(f:read("*a"))
-  f:close()
+  local text = read_file(state_path())
+  local state = text and rex.json.decode(text)
   return type(state) == "table" and state or {}
 end
 
@@ -224,13 +265,12 @@ local function close_modal(session_id)
 end
 
 local function open_modal(ctx, mode)
-  if config_error then fail("fix the setup in init.lua: " .. config_error) end
+  if setup_error then fail(setup_error) end
   local cwd = focused_cwd(ctx.block_id)
   if cwd == nil then fail("can't tell which repo the focused pane is in") end
-  local main = main_of(cwd)
-  if main == nil then fail("not a git repository: " .. cwd) end
+  if not in_repo(ctx.block_id, cwd) then fail("not a git repository: " .. cwd) end
 
-  local command = { "bash", script_path(), mode, ctx.client_id or "" }
+  local command = { "bash", "-c", modal_text, "lanes", mode, ctx.client_id or "", bundle_text }
   if mode == "new" then
     if M.options.agents == nil then
       command[#command + 1] = "rex"
@@ -276,14 +316,56 @@ local function check_options(opts)
   if opts.layouts ~= nil then return L.check(opts.layouts) end
 end
 
+-- The source text of the module that returned layouts. nil if no module did.
+local function module_source(layouts)
+  for name, value in pairs(package.loaded) do
+    if value == layouts then
+      local file = name:gsub("%.", "/")
+      for template in package.path:gmatch("[^;]+") do
+        local text = read_file((template:gsub("%?", file)))
+        if text then return text end
+      end
+    end
+  end
+  return nil
+end
+
+-- Lua source that returns the layouts. Lanes sends a layouts file without
+-- changes. Lanes serializes layouts from init.lua, but it can't serialize a
+-- function. In that case, this returns nil and the mistake.
+local function layouts_source(layouts)
+  local source = module_source(layouts)
+  if source then return source end
+  local text, place = L.serialize(layouts, "layouts")
+  if text == nil then
+    return nil, place .. ": a function needs the layouts in a file of their own, loaded with require"
+  end
+  return "return " .. text
+end
+
+-- Sets modal_text and bundle_text. Returns the problem if it can't.
+local function prepare()
+  local layouts, err = layouts_source(M.options.layouts)
+  if layouts == nil then return "fix the setup in init.lua: " .. err end
+  local dir = install_dir()
+  local init, layout = read_file(dir .. "/init.lua"), read_file(dir .. "/layout.lua")
+  modal_text = read_file(dir .. "/modal.sh")
+  if not (init and layout and modal_text) then
+    return "init.lua, layout.lua or modal.sh is missing from " .. dir
+  end
+  bundle_text = L.bundle{ init = init, layout = layout, layouts = layouts, path = package.path }
+end
+
 function M.setup(opts)
   opts = opts or {}
-  config_error = check_options(opts)
-  if config_error then
-    rex.log("error", "lanes: " .. config_error)
+  local mistake = check_options(opts)
+  if mistake then
+    setup_error = "fix the setup in init.lua: " .. mistake
   else
     for k, v in pairs(opts) do M.options[k] = v end
+    setup_error = prepare()
   end
+  if setup_error then rex.log("error", "lanes: " .. setup_error) end
 
   rex.action{
     name        = "lanes_new",
@@ -303,28 +385,26 @@ function M.setup(opts)
     run = function(ctx) open_modal(ctx, "remove") end,
   }
 
-  -- Called by modal.sh.
-  local wt_args = { path = "string", branch = "string", main = "string", repo = "string?" }
+  return M
+end
+
+-- The bundle calls this function, in the `rex do` that the modal runs.
+function M.session_actions(layouts)
+  M.options.layouts = layouts
 
   rex.action{
-    name        = "lanes_open",
-    title       = "Lanes: Open Session",
-    description = "Used by the Lanes modal: open a worktree's session, building it when missing.",
-    category    = "Lanes",
-    args        = { path = "string", branch = "string", main = "string", repo = "string?", agent = "string?" },
+    name  = "lanes_open",
+    title = "Lanes: Open Session",
+    args  = { path = "string", branch = "string", main = "string", repo = "string?", agent = "string?" },
     run = function(ctx, args) return M.open(ctx, args.path, args.branch, args.main, args.repo, args.agent) end,
   }
 
   rex.action{
-    name        = "lanes_close",
-    title       = "Lanes: Close Session",
-    description = "Used by the Lanes modal: close the session of a removed worktree.",
-    category    = "Lanes",
-    args        = wt_args,
+    name  = "lanes_close",
+    title = "Lanes: Close Session",
+    args  = { path = "string", branch = "string", main = "string", repo = "string?" },
     run = function(ctx, args) return M.close(ctx, args.path, args.branch, args.main, args.repo) end,
   }
-
-  return M
 end
 
 return M

@@ -6,7 +6,7 @@ shellcheck = "0.11.0"
 
 [tasks.test]
 description = "Run the Lua tests"
-run = "lua tests/layout_test.lua"
+run = ["lua tests/layout_test.lua", "lua tests/init_test.lua"]
 
 [tasks.lint]
 description = "Check modal.sh with shellcheck and with the bash macOS ships"
