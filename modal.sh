@@ -95,15 +95,20 @@ If the session is in the sidebar, turn on Rex → Settings → Rex Server → Re
 }
 
 new() {
-  local out query key sel name path agent create
+  local out query key sel name path agent base
   load
+
+  # A new branch builds on what the focused pane has checked out: its branch,
+  # or its commit on a detached HEAD. This shell runs in that pane's directory.
+  base=$(git branch --show-current)
+  [[ -n $base ]] || base=$(git rev-parse HEAD) || hold "Can't tell which commit to branch from"
 
   # Enter takes the typed name exactly (existing → open, new → create); with
   # nothing typed it opens the highlighted worktree. alt-enter opens the
   # highlighted one even when something is typed.
   out=$(fzf "${FZF_OPTS[@]}" --print-query --expect=alt-enter \
       --prompt='new worktree ❯ ' \
-      --header=$'Type a branch name · ↵ create (or open if it exists) · alt-↵ open highlighted · esc cancel' \
+      --header="New branches start from $base"$'\nType a branch name · ↵ create (or open if it exists) · alt-↵ open highlighted · esc cancel' \
       <<<"$ITEMS")
   [[ $? -gt 1 ]] && exit 0
   { IFS= read -r query; IFS= read -r key; IFS= read -r sel; } <<<"$out"
@@ -128,17 +133,17 @@ new() {
 
   # A branch that exists here or on a remote is checked out, and wt makes a
   # tracking branch for a remote one. Any other name is a new branch.
-  create=--create
-  if git show-ref --quiet --verify "refs/heads/$name" \
-    || [[ -n $(git for-each-ref --count=1 --format=x "refs/remotes/*/$name") ]]; then
-    create=
+  local switch_args=("$name" --no-cd --format=json)
+  if ! git show-ref --quiet --verify "refs/heads/$name" \
+    && [[ -z $(git for-each-ref --count=1 --format=x "refs/remotes/*/$name") ]]; then
+    switch_args+=(--create --base "$base")
   fi
 
   # Hooks run here, where their output is visible: wt prints them on stderr
   # and only the JSON result on stdout. --no-cd: this shell is not the one
   # that will live in the worktree.
-  dim "wt switch${create:+ $create} $name"
-  out=$(command wt switch ${create:+"$create"} "$name" --no-cd --format=json) \
+  dim "wt switch ${switch_args[*]}"
+  out=$(command wt switch "${switch_args[@]}") \
     || hold "wt switch failed (see above)"
   path=$(jq -r '.path // empty' <<<"$out")
   [[ -n $path ]] || hold "WorkTrunk reported no worktree for $name"
