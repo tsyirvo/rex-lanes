@@ -10,6 +10,19 @@ package.preload["lanes.layout"] = function() return require("layout") end
 local ROOT = assert(os.getenv("PWD"), "PWD is not set")
 local INIT = ROOT .. "/init.lua"
 
+-- init.lua keeps its state file in XDG_STATE_HOME. The fake rex.exec makes no
+-- directories, and the tests must not write to the real state file. So they get
+-- a temporary directory that already contains rex/.
+local STATE_HOME = os.tmpname()
+os.remove(STATE_HOME)
+assert(os.execute("mkdir -p '" .. STATE_HOME .. "/rex'") == 0, "can't make the state directory")
+
+local real_getenv = os.getenv
+os.getenv = function(name)
+  if name == "XDG_STATE_HOME" then return STATE_HOME end
+  return real_getenv(name)
+end
+
 local passed, failed = 0, 0
 
 local function test(name, fn)
@@ -243,6 +256,8 @@ test("a missing install file is reported once, with one prefix", function()
   eq(run("lanes_new"), "lanes: init.lua, layout.lua or modal.sh is missing from /nonexistent")
   eq(#state.layers, 0)
 end)
+
+os.execute("rm -rf '" .. STATE_HOME .. "'")
 
 print(("%d passed, %d failed"):format(passed, failed))
 os.exit(failed == 0 and 0 or 1)
