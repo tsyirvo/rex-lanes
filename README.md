@@ -21,6 +21,8 @@ Press a key, type a branch, pick an agent. Lanes creates the worktree with [Work
 
 ¹ Sessions survive server restarts from preview.23. ² Lanes requires schema 2 of `wt list --format=json`.
 
+Install Lanes on the Mac only. It also works in sessions on remote hosts, which need no copy of it, but `wt`, `fzf`, `jq`, `git`, `bash` and `rex` must be on the `PATH` of the machine the pane runs on.
+
 Turn on **Rex → Settings → Rex Server → Remote Control** so Lanes can switch the app to the new session. Without it, open the session from the sidebar.
 
 ## Install
@@ -100,11 +102,15 @@ A tab has at most one of `agent`, `command` or `panes`. `command` and `cwd` can 
 
 Config errors don't break the rest of your `init.lua`; Lanes reports them, with their location, when you run one of its actions.
 
+Keep layouts that use functions in their own file, loaded with `require`, because Lanes sends that file's text to the machine the worktree is on. Functions run there, so they see that machine's files. A layouts file that requires another file needs it on that machine too.
+
 ## How it works
 
-Rex actions can't read input and must finish within 30 seconds, so `lanes_new` and `lanes_remove` only open a floating terminal running `modal.sh`. It runs the fzf pickers and `wt`, then calls back with `rex do lanes_open` / `lanes_close`, targeting the app that opened it. `init.lua` then finds or builds the session and switches to it.
+Rex actions can't read input and must finish within 30 seconds, so `lanes_new` and `lanes_remove` only open a floating terminal running `modal.sh`. It runs the fzf pickers and `wt`, then runs `lanes_open` / `lanes_close` with `rex do`, which find or build the session and switch the app to it.
 
-Session IDs are stored in `$XDG_STATE_HOME/rex/lanes.json` (default `~/.local/state/rex/lanes.json`); stale entries are dropped. Session labels (`repo/branch`) are display-only.
+Actions run on the Mac, even when the pane is on a remote host, and `rex.exec` can only start programs on the Mac. So Lanes looks for the repository through the pane, and gives the floating terminal the text of `modal.sh` and of a bundle holding its Lua and your layouts. `lanes_open` and `lanes_close` come from that bundle, so they run on the pane's machine.
+
+Session IDs are stored in `$XDG_STATE_HOME/rex/lanes.json` (default `~/.local/state/rex/lanes.json`) on the machine that has the worktree; stale entries are dropped. Session labels (`repo/branch`) are display-only.
 
 ## Develop
 
