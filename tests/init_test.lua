@@ -54,7 +54,7 @@ local state
 local function fake_rex()
   state = {
     actions = {}, logs = {}, layers = {}, created = {}, queued = {},
-    sessions = {}, blocks = {}, panes = {}, destroyed = {}, closed_windows = {}, new_windows = {},
+    sessions = {}, blocks = {}, panes = {}, destroyed = {}, closed_windows = {}, new_windows = {}, listed = {},
     cwd = "/srv/repo/sub", pwd = nil, git = { ["/srv/repo"] = true },
     exec = function(argv) error("rex.exec on the wrong machine: " .. table.concat(argv, " "), 0) end,
   }
@@ -102,7 +102,10 @@ local function fake_rex()
     },
     call = function(method, args)
       if method == "session.list" then return { sessions = state.sessions } end
-      if method == "session.list_blocks" then return { blocks = state.blocks[args.session_id] or {} } end
+      if method == "session.list_blocks" then
+        state.listed[args.session_id] = (state.listed[args.session_id] or 0) + 1
+        return { blocks = state.blocks[args.session_id] or {} }
+      end
       if method == "session.close_window" then
         for _, b in ipairs(state.blocks[args.session_id] or {}) do
           if b.window_id == args.window_id then
@@ -467,6 +470,14 @@ test("an untracked tab with panes only in the worktree is closed, keeping the se
   eq(#state.queued, 0, "selects")
 end)
 
+test("an untracked session keeps a tab where no pane reports a directory", function()
+  session_actions({ { "wt", IN_WORKTREE, { cwd = "x", window = "tab2" } } })
+  local out = close("wt")
+  eq(out.windows_closed, 1)
+  eq(state.closed_windows[1], "wt-w")
+  eq(#state.destroyed, 0, "destroyed")
+end)
+
 test("a tab with a pane outside the worktree is never closed", function()
   session_actions({ { "here", { cwd = "/srv/a", pwd = "/srv/a" },
     { cwd = "x", pwd = WORKTREE, window = "tab2" }, { cwd = "y", pwd = "/srv/b", window = "tab2" } } })
@@ -565,6 +576,24 @@ test("removing a worktree keeps another worktree's tab in its session", function
   eq(state.closed_windows[1], "wt-w")
   eq(state.saved[WORKTREE], nil)
   eq(state.saved["/srv/repo.b"].window_id, "tab2")
+end)
+
+test("without a kept lane, another worktree's tab is never closed", function()
+  -- repo.b's panes moved into the removed worktree, yet its tab stays.
+  session_actions({ { "here", { cwd = "/srv/a", pwd = "/srv/a" }, IN_WORKTREE_TAB,
+    { cwd = "y", pwd = WORKTREE, window = "tab3" } } })
+  track("/srv/repo.b", { session_id = "here", window_id = "tab3" })
+  close("here")
+  eq(#state.closed_windows, 1, "windows closed")
+  eq(state.closed_windows[1], "tab2")
+  eq(state.saved["/srv/repo.b"].window_id, "tab3")
+end)
+
+test("removing a tab lists its session once", function()
+  session_actions({ { "here", { cwd = "/srv/a" }, IN_WORKTREE_TAB }, { "main", { cwd = MAIN } } })
+  track(WORKTREE, { session_id = "here", window_id = "tab2" })
+  close("here")
+  eq(state.listed.here, 1, "listings of the session")
 end)
 
 -- State files
