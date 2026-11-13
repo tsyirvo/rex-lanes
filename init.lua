@@ -161,32 +161,54 @@ local function in_repo(block_id, dir)
   return false
 end
 
--- The state file: { [worktree path] = session_id }.
+-- Where a worktree lives is its lane: { session_id } for a whole session, or
+-- { session_id, window_id } for one tab of a session.
+
+-- The state file: { [worktree path] = session_id or { session_id, window_id } }.
+-- A session lane is written as a bare ID, as older versions wrote every entry.
 local function state_path()
   local dir = os.getenv("XDG_STATE_HOME") or (os.getenv("HOME") .. "/.local/state")
   return dir .. "/rex/lanes.json"
 end
 
+local function as_lane(value)
+  if type(value) == "string" then return { session_id = value } end
+  if type(value) == "table" and type(value.session_id) == "string" then
+    return { session_id = value.session_id, window_id = type(value.window_id) == "string" and value.window_id or nil }
+  end
+  return nil
+end
+
 local function read_state()
   local text = read_file(state_path())
-  local state = text and rex.json.decode(text)
-  return type(state) == "table" and state or {}
+  local raw = text and rex.json.decode(text)
+  local state = {}
+  if type(raw) == "table" then
+    for path, value in pairs(raw) do
+      if type(path) == "string" then state[path] = as_lane(value) end
+    end
+  end
+  return state
 end
 
 -- Written to a temporary file and renamed, so a reader never sees half of it.
 local function write_state(state)
+  local raw = {}
+  for path, lane in pairs(state) do
+    raw[path] = lane.window_id and { session_id = lane.session_id, window_id = lane.window_id } or lane.session_id
+  end
   local path = state_path()
   rex.exec{ "mkdir", "-p", (path:gsub("/[^/]+$", "")) }
   local f = check(io.open(path .. ".tmp", "w"))
-  f:write(check(rex.json.encode(state, { indent = true })))
+  f:write(check(rex.json.encode(raw, { indent = true })))
   f:close()
   check(os.rename(path .. ".tmp", path))
 end
 
--- Remember a worktree's session, or forget it when session_id is nil.
-local function remember(path, session_id)
+-- Remember a worktree's lane, or forget it when lane is nil.
+local function remember(path, lane)
   local state = read_state()
-  state[path] = session_id
+  state[path] = lane
   write_state(state)
 end
 
@@ -194,16 +216,70 @@ local function list_sessions()
   return check(rex.call("session.list")).sessions or {}
 end
 
--- The session kept for a worktree, if it still exists. Entries for sessions
--- that are gone, closed by hand or discarded with the server, are dropped.
-local function find_session(wt)
-  local live = {}
+-- Every block of a session: { block_id, creator_name, window_id }. window_id is
+-- nil for a block in no window, such as a detached one. A connection only
+-- reaches sessions it is attached to. nil and the error when the session can't
+-- be listed.
+local function blocks_of(session_id)
+  local ok, err = rex.call("session.attach", { session_id = session_id })
+  if ok == nil then return nil, err end
+  local listed
+  listed, err = rex.call("session.list_blocks", { session_id = session_id })
+  if listed == nil then return nil, err end
+  local blocks = {}
+  for _, b in ipairs(listed.blocks or {}) do
+    blocks[#blocks + 1] = {
+      block_id = b.block_id,
+      creator_name = b.creator_name,
+      window_id = type(b.window_id) == "string" and b.window_id or nil,
+    }
+  end
+  return blocks
+end
+
+local function terminals(blocks)
+  local found = {}
+  for _, b in ipairs(blocks) do
+    if b.creator_name == TERMINAL then found[#found + 1] = b end
+  end
+  return found
+end
+
+-- The windows of a session, as a set, or nil if it can't be listed.
+local function windows_of(session_id)
+  local blocks = blocks_of(session_id)
+  if blocks == nil then return nil end
+  local windows = {}
+  for _, b in ipairs(blocks) do
+    if b.window_id then windows[b.window_id] = true end
+  end
+  return windows
+end
+
+-- Tells if a lane still exists. live caches what Rex reported: live.sessions,
+-- the set of sessions, and live.windows, each session's windows (false when it
+-- couldn't be listed).
+local function lane_alive(lane, live)
+  if not live.sessions[lane.session_id] then return false end
+  if lane.window_id == nil then return true end
+  local windows = live.windows[lane.session_id]
+  if windows == nil then
+    windows = windows_of(lane.session_id) or false
+    live.windows[lane.session_id] = windows
+  end
+  return windows and windows[lane.window_id] == true or false
+end
+
+-- The lane kept for a worktree, if it still exists. Entries for lanes that are
+-- gone, closed by hand or discarded with the server, are dropped.
+local function find_lane(wt)
+  local live = { sessions = {}, windows = {} }
   for _, s in ipairs(list_sessions()) do
-    live[s.session_id] = true
+    live.sessions[s.session_id] = true
   end
   local state, stale = read_state(), false
-  for path, id in pairs(state) do
-    if not live[id] then
+  for path, lane in pairs(state) do
+    if not lane_alive(lane, live) then
       state[path] = nil
       stale = true
     end
@@ -212,29 +288,22 @@ local function find_session(wt)
   return state[wt.path]
 end
 
--- A connection only reaches sessions it is attached to.
-local function terminal_blocks(session_id)
-  check(rex.call("session.attach", { session_id = session_id }))
-  local ids = {}
-  for _, block in ipairs(check(rex.call("session.list_blocks", { session_id = session_id })).blocks or {}) do
-    if block.creator_name == TERMINAL then ids[#ids + 1] = block.block_id end
-  end
-  return ids
-end
-
--- The first session with a pane in the checkout at path, except the given one.
+-- The first tab with a pane in the checkout at path, outside the given session.
 -- This compares git toplevels, not path prefixes: a worktree can be nested in
 -- the main checkout, and wt moves a removed worktree into the main checkout's
--- .git, with its panes still in it.
-local function session_on(path, except)
+-- .git, with its panes still in it. A place to show, never a lane to remember
+-- or close: the tab may have been opened by hand.
+local function lane_on(path, except)
   local checkout = git(path, "rev-parse", "--show-toplevel")
   if checkout == nil then return nil end
   for _, s in ipairs(list_sessions()) do
     if s.session_id ~= except then
-      for _, block_id in ipairs(terminal_blocks(s.session_id)) do
-        local cwd = pane_cwd(block_id, s.session_id)
-        if cwd and git(cwd, "rev-parse", "--show-toplevel") == checkout then
-          return s.session_id
+      for _, b in ipairs(terminals(check(blocks_of(s.session_id)))) do
+        if b.window_id then
+          local cwd = pane_cwd(b.block_id, s.session_id)
+          if cwd and git(cwd, "rev-parse", "--show-toplevel") == checkout then
+            return { session_id = s.session_id, window_id = b.window_id }
+          end
         end
       end
     end
@@ -242,19 +311,32 @@ local function session_on(path, except)
   return nil
 end
 
--- Tells if the session only has panes in the directory. It reads the reported
--- directories, because the panes' processes are in wt's trash by now. Terminals
--- that report nothing, such as the modal, don't count.
-local function only_in(session_id, path)
-  local found = false
-  for _, block_id in ipairs(terminal_blocks(session_id)) do
-    local cwd = reported_cwd(block_id, session_id)
-    if cwd then
-      if not L.is_within(cwd, path) then return false end
-      found = true
+-- The windows of a session whose panes are all in the directory, and whether
+-- that is the whole session. It reads the reported directories, because the
+-- panes' processes are in wt's trash by now. Terminals that report nothing,
+-- such as the modal, don't count, and a window none of whose terminals report
+-- is neither in nor out. keep is a set of windows never to count as in.
+local function windows_in(session_id, path, keep)
+  local verdict, order = {}, {}
+  for _, b in ipairs(terminals(check(blocks_of(session_id)))) do
+    local w = b.window_id
+    if w then
+      if verdict[w] == nil then
+        order[#order + 1] = w
+        verdict[w] = "silent"
+      end
+      local cwd = reported_cwd(b.block_id, session_id)
+      if cwd and verdict[w] ~= "out" then
+        verdict[w] = (L.is_within(cwd, path) and not (keep and keep[w])) and "in" or "out"
+      end
     end
   end
-  return found
+  local inside, whole = {}, true
+  for _, w in ipairs(order) do
+    if verdict[w] == "in" then inside[#inside + 1] = w end
+    if verdict[w] == "out" then whole = false end
+  end
+  return inside, whole and #inside > 0
 end
 
 -- The session after the given one, wrapping around. nil if it is the only one.
@@ -270,56 +352,61 @@ local function next_session(session_id)
 end
 
 local function create_session(wt, agent)
-  local windows = L.windows(rex.layout, L.pick(M.options.layouts, wt), wt, agent)
+  local windows = L.windows(rex.layout, L.pick(M.options.layouts, wt, "session"), wt, agent)
   if #windows == 0 then fail("the layout for " .. wt.repo .. " has no tabs to open") end
 
   local created = check(rex.call("session.create", {
     label = L.label(wt),
     initial_windows = windows,
   }))
-  return created.session_id, created.initial_windows[1].window_id
+  rex.exec{ "sleep", SELECT_DELAY }
+  return { session_id = created.session_id, window_id = created.initial_windows[1].window_id }
 end
 
--- Show a session in the client that ran the action: the app itself from a key
--- or the palette, the one named with `rex -C` from the modal. The app accepts
--- it from `rex do` only with Remote Control on.
-local function show(session_id, window_id)
-  rex.client.queue("session.select", { session_id = session_id, window_id = window_id })
+-- Show a lane in the client that ran the action: the app itself from a key or
+-- the palette, the one named with `rex -C` from the modal. The app accepts it
+-- from `rex do` only with Remote Control on.
+local function show(lane)
+  rex.client.queue("session.select", { session_id = lane.session_id, window_id = lane.window_id })
 end
 
--- agent is nil when nobody picked one yet. A missing session then comes back
--- as needs_agent instead of being built, so the modal can ask. "" is no agent.
+-- agent is nil when nobody picked one yet. A missing lane then comes back as
+-- needs_agent instead of being built, so the modal can ask. "" is no agent.
 local function open_wt(wt, agent)
   if not is_dir(wt.path) then fail("not a directory: " .. wt.path) end
-  local session_id, window_id = find_session(wt) or session_on(wt.path), nil
-  local created = session_id == nil
+  local lane = find_lane(wt) or lane_on(wt.path)
+  local created = lane == nil
   if created then
     if agent == nil then return { needs_agent = true } end
-    session_id, window_id = create_session(wt, agent)
-    remember(wt.path, session_id)
-    rex.exec{ "sleep", SELECT_DELAY }
+    lane = create_session(wt, agent)
+    remember(wt.path, { session_id = lane.session_id })
   end
-  show(session_id, window_id)
-  return { session_id = session_id, created = created }
+  show(lane)
+  return { session_id = lane.session_id, window_id = lane.window_id, created = created }
 end
 
--- Open the session for a worktree, creating it when missing.
+-- Open the lane for a worktree, creating it when missing.
 function M.open(_, path, branch, main, repo, agent)
   return open_wt(L.describe(path, branch, main, repo), agent)
 end
 
--- Close the session of a removed worktree. When the modal ran inside that very
--- session, move to a session on the main checkout, else to the next session.
-function M.close(ctx, path, branch, main, repo)
-  local session_id = find_session(L.describe(path, branch, main, repo))
-  if session_id == nil and ctx.session_id and only_in(ctx.session_id, path) then
-    session_id = ctx.session_id
+local function close_windows(session_id, windows)
+  for _, window_id in ipairs(windows) do
+    local ok, err = rex.call("session.close_window", { session_id = session_id, window_id = window_id })
+    -- not_found: the tab is already gone.
+    if ok == nil and not tostring(err):find("code=not_found", 1, true) then fail(tostring(err)) end
   end
-  if session_id == nil then return { closed = false } end
+end
+
+-- Destroy a session lane. When the modal ran inside that very session, first
+-- move to a lane on the main checkout, else to the next session.
+local function destroy_session(ctx, session_id, path, main, repo)
   if session_id == ctx.session_id then
-    local target = find_session(L.describe(main, "", main, repo))
-      or session_on(main, session_id)
-      or next_session(session_id)
+    local target = find_lane(L.describe(main, "", main, repo)) or lane_on(main, session_id)
+    if target == nil then
+      local following = next_session(session_id)
+      target = following and { session_id = following }
+    end
     if target then show(target) end
   end
   -- Destroying the session that holds the modal also ends this script.
@@ -327,6 +414,24 @@ function M.close(ctx, path, branch, main, repo)
   check(rex.call("session.attach", { session_id = session_id }))
   check(rex.call("session.destroy", { session_id = session_id }))
   return { closed = true, session_id = session_id }
+end
+
+-- Close the lane of a removed worktree. Without a kept lane, the modal's
+-- session gives up the tabs whose panes are all in the worktree, and the whole
+-- session goes when that is every tab.
+function M.close(ctx, path, branch, main, repo)
+  local lane = find_lane(L.describe(path, branch, main, repo))
+  if lane == nil and ctx.session_id then
+    local inside, whole = windows_in(ctx.session_id, path)
+    if whole then
+      lane = { session_id = ctx.session_id }
+    elseif #inside > 0 then
+      close_windows(ctx.session_id, inside)
+      return { closed = true, session_id = ctx.session_id, windows_closed = #inside }
+    end
+  end
+  if lane == nil then return { closed = false } end
+  return destroy_session(ctx, lane.session_id, path, main, repo)
 end
 
 local function close_modal(session_id)
