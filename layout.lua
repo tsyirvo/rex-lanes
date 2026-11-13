@@ -1,5 +1,5 @@
--- What a worktree's session looks like: which layout applies to it, the tabs
--- and panes that layout makes, and the session's label. Nothing here calls
+-- What a worktree's session or tab looks like: which layout applies to it, the
+-- tabs and panes that layout makes, and their labels. Nothing here calls
 -- Rex. The layout builders come in as an argument (rex.layout in Rex), so the
 -- tests can run this file under plain Lua 5.1.
 --
@@ -96,6 +96,7 @@ end
 -- lanes_open and lanes_close on the machine that runs it. The fields of parts:
 --   init, layout: the source of init.lua and layout.lua.
 --   layouts: the source of the layouts.
+--   open: the open option, "session" or "tab".
 --   path: the package.path of the config. A layouts file can then require the
 --     files next to it, if they are on that machine.
 function L.bundle(parts)
@@ -103,7 +104,8 @@ function L.bundle(parts)
     ("package.path = %q .. package.path"):format(parts.path .. ";"),
     ('package.preload["lanes.layout"] = assert(loadstring(%q, "=lanes/layout.lua"))'):format(parts.layout),
     ('local lanes = assert(loadstring(%q, "=lanes/init.lua"))("lanes")'):format(parts.init),
-    ('lanes.session_actions(assert(loadstring(%q, "=lanes layouts"))())'):format(parts.layouts),
+    ('lanes.session_actions{ layouts = assert(loadstring(%q, "=lanes layouts"))(), open = %q }')
+      :format(parts.layouts, parts.open),
   }, "\n")
 end
 

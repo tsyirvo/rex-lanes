@@ -1,5 +1,5 @@
--- Lanes: create and remove git worktrees from a modal, one Rex session per
--- worktree, laid out per repository. WorkTrunk (`wt`) does the git work.
+-- Lanes: create and remove git worktrees from a modal, one Rex session or tab
+-- per worktree, laid out per repository. WorkTrunk (`wt`) does the git work.
 --
 -- Clone into ~/.config/rex/lanes, copy layouts.example.lua to
 -- ~/.config/rex/lanes-layouts.lua, then in ~/.config/rex/init.lua:
@@ -15,7 +15,7 @@
 --   an action can't read input and must finish in 30 seconds.
 --
 --   The modal then runs lanes_open or lanes_close. These actions build or
---   destroy the session.
+--   close the worktree's session or tab (its lane).
 --
 --   lanes_new and lanes_remove run on this machine, but the focused pane can be
 --   on a remote host:
@@ -40,9 +40,10 @@
 --   and the modal says how to reach it.
 --
 -- Layouts (see layout.lua and layouts.example.lua) pick the tabs and panes per
--- repo. A worktree's session is labelled {repo}/{branch}, but found again by
--- the ID kept for its path in $XDG_STATE_HOME/rex/lanes.json: agents and
--- people rename sessions, and session IDs survive server restarts.
+-- repo. A worktree's session is labelled {repo}/{branch} and its tab {branch},
+-- but both are found again by the IDs kept for its path in
+-- $XDG_STATE_HOME/rex/lanes.json: agents and people rename them, and session
+-- IDs survive server restarts.
 
 local L = require((... or "lanes") .. ".layout")
 
@@ -56,7 +57,7 @@ local TERMINAL = "com.superlogical.terminal"
 
 -- The app drops a session.select for a session it hasn't heard of yet, so a
 -- new session is shown after this many seconds. A slow remote host may need
--- more.
+-- more. A new tab needs no wait: it opens in the session on screen, active.
 local SELECT_DELAY = "0.2"
 
 M.options = {
@@ -68,9 +69,13 @@ M.options = {
   bounds = { 0.2, 0.15, 0.6, 0.6 },
   -- See layouts.example.lua.
   layouts = {},
+  -- How a new worktree opens: "session", a session of its own, or "tab", one
+  -- tab in the session the modal was opened from. Either way, a worktree that
+  -- already has a session or a tab goes there.
+  open = "session",
 }
 
-local OPTIONS = { agents = true, bounds = true, layouts = true }
+local OPTIONS = { agents = true, bounds = true, layouts = true, open = true }
 
 -- The first problem that setup found. An error at load would stop the rest of
 -- init.lua, and people don't see a log line. So the actions report the problem.
@@ -363,6 +368,18 @@ local function create_session(wt, agent)
   return { session_id = created.session_id, window_id = created.initial_windows[1].window_id }
 end
 
+local function create_tab(wt, agent, session_id)
+  if session_id == nil then fail("lanes_open opens a tab in its session: run it from a Rex terminal") end
+  local window = L.tab_window(rex.layout, L.pick(M.options.layouts, wt, "tab"), wt, agent)
+  check(rex.call("session.attach", { session_id = session_id }))
+  local created = check(rex.call("session.new_window", {
+    session_id = session_id,
+    window_label = window.window_label,
+    layout = window.layout,
+  }))
+  return { session_id = session_id, window_id = created.window_id }
+end
+
 -- Show a lane in the client that ran the action: the app itself from a key or
 -- the palette, the one named with `rex -C` from the modal. The app accepts it
 -- from `rex do` only with Remote Control on.
@@ -372,30 +389,39 @@ end
 
 -- agent is nil when nobody picked one yet. A missing lane then comes back as
 -- needs_agent instead of being built, so the modal can ask. "" is no agent.
-local function open_wt(wt, agent)
+local function open_wt(wt, agent, session_id)
   if not is_dir(wt.path) then fail("not a directory: " .. wt.path) end
   local lane = find_lane(wt) or lane_on(wt.path)
   local created = lane == nil
   if created then
     if agent == nil then return { needs_agent = true } end
-    lane = create_session(wt, agent)
-    remember(wt.path, { session_id = lane.session_id })
+    if M.options.open == "tab" then
+      lane = create_tab(wt, agent, session_id)
+      remember(wt.path, lane)
+    else
+      lane = create_session(wt, agent)
+      remember(wt.path, { session_id = lane.session_id })
+    end
   end
   show(lane)
   return { session_id = lane.session_id, window_id = lane.window_id, created = created }
 end
 
--- Open the lane for a worktree, creating it when missing.
-function M.open(_, path, branch, main, repo, agent)
-  return open_wt(L.describe(path, branch, main, repo), agent)
+-- Open the lane for a worktree, creating it when missing. A tab opens in the
+-- session the action runs from, the modal's.
+function M.open(ctx, path, branch, main, repo, agent)
+  return open_wt(L.describe(path, branch, main, repo), agent, ctx.session_id)
 end
 
-local function close_windows(session_id, windows)
+-- Rex picks a neighboring tab when the active one closes, and the modal is a
+-- layer on the session, not in a tab, so nothing needs moving.
+local function close_tabs(session_id, windows)
   for _, window_id in ipairs(windows) do
     local ok, err = rex.call("session.close_window", { session_id = session_id, window_id = window_id })
     -- not_found: the tab is already gone.
     if ok == nil and not tostring(err):find("code=not_found", 1, true) then fail(tostring(err)) end
   end
+  return { closed = true, session_id = session_id, windows_closed = #windows }
 end
 
 -- Destroy a session lane. When the modal ran inside that very session, first
@@ -416,21 +442,49 @@ local function destroy_session(ctx, session_id, path, main, repo)
   return { closed = true, session_id = session_id }
 end
 
--- Close the lane of a removed worktree. Without a kept lane, the modal's
--- session gives up the tabs whose panes are all in the worktree, and the whole
--- session goes when that is every tab.
+-- The tabs that other worktrees' kept lanes have in the session, as a set.
+local function other_tabs(session_id, path)
+  local tabs = {}
+  for other, lane in pairs(read_state()) do
+    if other ~= path and lane.session_id == session_id and lane.window_id then tabs[lane.window_id] = true end
+  end
+  return tabs
+end
+
+local function count(set)
+  local n = 0
+  for _ in pairs(set) do n = n + 1 end
+  return n
+end
+
+-- Close the lane of a removed worktree:
+--   - A tab closes, or its whole session when it is the session's only tab: an
+--     empty session would stay behind.
+--   - A session that also holds other worktrees' tabs stays, giving up only the
+--     tabs whose panes are all in the worktree.
+--   - Without a kept lane, the modal's session gives up the tabs whose panes
+--     are all in the worktree, and the whole session goes when that is every
+--     tab.
 function M.close(ctx, path, branch, main, repo)
   local lane = find_lane(L.describe(path, branch, main, repo))
-  if lane == nil and ctx.session_id then
+  if lane == nil then
+    if ctx.session_id == nil then return { closed = false } end
     local inside, whole = windows_in(ctx.session_id, path)
-    if whole then
-      lane = { session_id = ctx.session_id }
-    elseif #inside > 0 then
-      close_windows(ctx.session_id, inside)
-      return { closed = true, session_id = ctx.session_id, windows_closed = #inside }
+    if #inside == 0 then return { closed = false } end
+    if not whole then return close_tabs(ctx.session_id, inside) end
+    lane = { session_id = ctx.session_id }
+  elseif lane.window_id then
+    if count(windows_of(lane.session_id) or {}) > 1 then
+      remember(path, nil)
+      return close_tabs(lane.session_id, { lane.window_id })
+    end
+  else
+    local keep = other_tabs(lane.session_id, path)
+    if next(keep) then
+      remember(path, nil)
+      return close_tabs(lane.session_id, (windows_in(lane.session_id, path, keep)))
     end
   end
-  if lane == nil then return { closed = false } end
   return destroy_session(ctx, lane.session_id, path, main, repo)
 end
 
@@ -474,6 +528,9 @@ end
 local function check_options(opts)
   for k in pairs(opts) do
     if not OPTIONS[k] then return "unknown option " .. tostring(k) end
+  end
+  if opts.open ~= nil and opts.open ~= "session" and opts.open ~= "tab" then
+    return 'open: expected "session" or "tab", got ' .. tostring(opts.open)
   end
   local agents = opts.agents
   if agents ~= nil then
@@ -532,7 +589,7 @@ local function prepare()
     return "init.lua, layout.lua, picker.sh or modal.sh is missing from " .. dir
   end
   modal_text = picker .. "\n" .. modal
-  bundle_text = L.bundle{ init = init, layout = layout, layouts = layouts, path = package.path }
+  bundle_text = L.bundle{ init = init, layout = layout, layouts = layouts, open = M.options.open, path = package.path }
 end
 
 function M.setup(opts)
@@ -549,7 +606,7 @@ function M.setup(opts)
   rex.action{
     name        = "lanes_new",
     title       = "Lanes: New Worktree…",
-    description = "Create a worktree for the repo in the focused pane and open it in its own session.",
+    description = "Create a worktree for the repo in the focused pane and open it in its own session or tab.",
     category    = "Lanes",
     keywords    = "git worktree branch create new worktrunk wt agent",
     run = function(ctx) open_modal(ctx, "new") end,
@@ -558,7 +615,7 @@ function M.setup(opts)
   rex.action{
     name        = "lanes_remove",
     title       = "Lanes: Remove Worktree…",
-    description = "Remove a worktree of the repo in the focused pane and close its session.",
+    description = "Remove a worktree of the repo in the focused pane and close its session or tab.",
     category    = "Lanes",
     keywords    = "git worktree delete remove worktrunk wt",
     run = function(ctx) open_modal(ctx, "remove") end,
@@ -567,20 +624,22 @@ function M.setup(opts)
   return M
 end
 
--- The bundle calls this function, in the `rex do` that the modal runs.
-function M.session_actions(layouts)
-  M.options.layouts = layouts
+-- The bundle calls this function, in the `rex do` that the modal runs, with the
+-- config the actions need: { layouts, open }.
+function M.session_actions(config)
+  M.options.layouts = config.layouts
+  M.options.open = config.open or "session"
 
   rex.action{
     name  = "lanes_open",
-    title = "Lanes: Open Session",
+    title = "Lanes: Open Session or Tab",
     args  = { path = "string", branch = "string", main = "string", repo = "string?", agent = "string?" },
     run = function(ctx, args) return M.open(ctx, args.path, args.branch, args.main, args.repo, args.agent) end,
   }
 
   rex.action{
     name  = "lanes_close",
-    title = "Lanes: Close Session",
+    title = "Lanes: Close Session or Tab",
     args  = { path = "string", branch = "string", main = "string", repo = "string?" },
     run = function(ctx, args) return M.close(ctx, args.path, args.branch, args.main, args.repo) end,
   }

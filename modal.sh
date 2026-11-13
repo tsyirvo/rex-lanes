@@ -7,12 +7,12 @@
 #   bash -c "$(cat picker.sh modal.sh)" lanes MODE CLIENT BUNDLE [ARG...]
 #
 #   new CLIENT BUNDLE rex             pick or type a branch, pick an agent, create
-#   new CLIENT BUNDLE list AGENT...   or open its session
-#   remove CLIENT BUNDLE              pick a worktree, `wt remove` it, close its session
+#   new CLIENT BUNDLE list AGENT...   or open its session or tab
+#   remove CLIENT BUNDLE              pick a worktree, `wt remove` it, close its session or tab
 #
 # CLIENT is the Rex client that opened the modal, or "" if it is not known.
 # BUNDLE is Lua that defines lanes_open and lanes_close (see init.lua). They run
-# on this machine with `rex do`, and they switch that client to the session.
+# on this machine with `rex do`, and they switch that client to the session or tab.
 #
 # The agent list has the agents that Rex supports (rex) or the given commands
 # (list), then "terminal only". An agent shows only if its program is on PATH.
@@ -87,13 +87,13 @@ pick_agent() {
   printf '%s' "${choice%%$'\t'*}"
 }
 
-# Opens the session for a worktree. Without an agent, a missing session comes
+# Opens the session or tab for a worktree. Without an agent, a missing one comes
 # back as needs_agent: ask for one, then try again with it ("" = none).
 open_session() {
   local path=$1 name=$2 out agent
   local args=(lanes_open "path=$path" "branch=$name" "main=$MAIN" "repo=$REPO")
   [[ $# -gt 2 ]] && args+=("agent=$3")
-  out=$(rexdo "${args[@]}") || hold "Could not switch to the session for $name (see above).
+  out=$(rexdo "${args[@]}") || hold "Could not switch to the session or tab for $name (see above).
 If the session is in the sidebar, turn on Rex → Settings → Rex Server → Remote Control to switch to it automatically."
   if jq -e '.needs_agent == true' >/dev/null 2>&1 <<<"$out"; then
     agent=$(pick_agent "$name") || exit 0
@@ -116,8 +116,8 @@ new() {
 
   path=$(path_of "$name")
   if [[ -n $path ]]; then
-    # Existing worktree: switch to its session. An agent is asked for only
-    # when the session has to be built.
+    # Existing worktree: switch to its session or tab. An agent is asked for
+    # only when one has to be built.
     open_session "$path" "$name"
     return
   fi
@@ -169,7 +169,7 @@ remove() {
   sleep 1
 
   rexdo lanes_close "path=$path" "branch=$name" "main=$MAIN" "repo=$REPO" >/dev/null \
-    || hold "Removed $name, but could not close its Rex session"
+    || hold "Removed $name, but could not close its Rex session or tab"
 }
 
 CLIENT=${2-} BUNDLE=${3-}
