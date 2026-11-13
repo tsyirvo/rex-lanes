@@ -54,7 +54,7 @@ local state
 local function fake_rex()
   state = {
     actions = {}, logs = {}, layers = {}, created = {}, queued = {},
-    sessions = {}, blocks = {}, panes = {}, destroyed = {},
+    sessions = {}, blocks = {}, panes = {}, destroyed = {}, closed_windows = {}, new_windows = {}, listed = {},
     cwd = "/srv/repo/sub", pwd = nil, git = { ["/srv/repo"] = true },
     exec = function(argv) error("rex.exec on the wrong machine: " .. table.concat(argv, " "), 0) end,
   }
@@ -102,10 +102,26 @@ local function fake_rex()
     },
     call = function(method, args)
       if method == "session.list" then return { sessions = state.sessions } end
-      if method == "session.list_blocks" then return { blocks = state.blocks[args.session_id] or {} } end
+      if method == "session.list_blocks" then
+        state.listed[args.session_id] = (state.listed[args.session_id] or 0) + 1
+        return { blocks = state.blocks[args.session_id] or {} }
+      end
+      if method == "session.close_window" then
+        for _, b in ipairs(state.blocks[args.session_id] or {}) do
+          if b.window_id == args.window_id then
+            state.closed_windows[#state.closed_windows + 1] = args.window_id
+            return { revision = 1 }
+          end
+        end
+        return nil, 'window ' .. args.window_id .. ' not found (status=404 code=not_found)'
+      end
       if method == "session.destroy" then
         state.destroyed[#state.destroyed + 1] = args.session_id
         state.saved_at_destroy = state.saved
+      end
+      if method == "session.new_window" then
+        state.new_windows[#state.new_windows + 1] = args
+        return { window_id = "new" .. #state.new_windows, block_ids = { "nb" } }
       end
       if method == "session.create" then
         state.created[#state.created + 1] = args
@@ -141,7 +157,11 @@ local function load_bundle()
   package.preload["lanes.layout"] = nil
   package.loaded["lanes.layout"] = nil
   state.actions = {}
+  -- The bundle prepends the config's package.path, which a real `rex do` starts
+  -- without. Kept, it would double with each bundle the tests load.
+  local saved_path = package.path
   assert(loadstring(modal_command()[7], "=bundle"))()
+  package.path = saved_path
   package.preload["lanes.layout"] = function() return require("layout") end
 end
 
@@ -257,6 +277,11 @@ test("a function in layouts written in init.lua is reported", function()
   eq(#state.layers, 0)
 end)
 
+test("open must be session or tab", function()
+  setup({ open = "window" })
+  has(run("lanes_new"), 'open: expected "session" or "tab", got window')
+end)
+
 test("a setup mistake is reported by the actions", function()
   setup({ bogus = true })
   has(run("lanes_new"), "fix the setup in init.lua: unknown option bogus")
@@ -277,17 +302,21 @@ end)
 
 local MAIN, WORKTREE = "/srv/repo", "/srv/repo.feat"
 
--- Each session is { id, pane, pane... }, and each pane is { cwd = ..., pwd = ... }.
--- A cwd's toplevel is the cwd itself, or the part before /mobile.
-local function session_actions(sessions)
-  setup({})
+-- Each session is { id, pane, pane... }, and each pane is { cwd = ..., pwd = ... },
+-- with window = ... for a tab other than the session's one tab, id .. "-w", or
+-- window = false for a detached pane. The modal is in no tab. A cwd's toplevel
+-- is the cwd itself, or the part before /mobile.
+local function session_actions(sessions, opts)
+  setup(opts or {})
   eq(run("lanes_new"), nil)
   load_bundle()
   for _, spec in ipairs(sessions) do
     local blocks = { { block_id = "modal-" .. spec[1], creator_name = "other" } }
     for i = 2, #spec do
       local block_id = spec[1] .. "-" .. i
-      blocks[#blocks + 1] = { block_id = block_id, creator_name = "com.superlogical.terminal" }
+      local window = spec[i].window
+      if window == nil then window = spec[1] .. "-w" end
+      blocks[#blocks + 1] = { block_id = block_id, creator_name = "com.superlogical.terminal", window_id = window or nil }
       state.panes[block_id] = spec[i]
     end
     state.sessions[#state.sessions + 1] = { session_id = spec[1], label = spec[1] }
@@ -315,10 +344,11 @@ end
 
 local function shown()
   local last = state.queued[#state.queued]
-  return last and last[2].session_id
+  return last and last[2].session_id, last and last[2].window_id
 end
 
 local IN_WORKTREE = { cwd = MAIN .. "/.git/wt/trash/feat", pwd = "file://host" .. WORKTREE }
+local IN_WORKTREE_TAB = { cwd = IN_WORKTREE.cwd, pwd = IN_WORKTREE.pwd, window = "tab2" }
 
 test("removing goes to a session on the main checkout that Lanes didn't create", function()
   session_actions({
@@ -413,6 +443,204 @@ test("opening a checkout goes to a session on it, without asking for an agent", 
   eq(out.session_id, "main")
   eq(out.created, false)
   eq(#state.created, 0, "sessions created")
+end)
+
+test("opening goes to the exact tab with a pane in the checkout", function()
+  session_actions({ { "main", { cwd = "/srv/a" }, { cwd = MAIN, window = "tab2" } } })
+  local out = state.actions.lanes_open.run({ session_id = "main" }, { path = MAIN, branch = "b", main = MAIN })
+  local session_id, window_id = shown()
+  eq(session_id, "main")
+  eq(window_id, "tab2")
+  eq(out.created, false)
+end)
+
+test("a detached pane is never a place to go", function()
+  session_actions({ { "main", { cwd = MAIN, window = false } } })
+  local out = state.actions.lanes_open.run({ session_id = "main" }, { path = MAIN, branch = "b", main = MAIN })
+  eq(out.needs_agent, true)
+end)
+
+test("an untracked tab with panes only in the worktree is closed, keeping the session", function()
+  session_actions({ { "here", { cwd = "/srv/a", pwd = "/srv/a" }, { cwd = "x", pwd = WORKTREE, window = "tab2" } } })
+  local out = close("here")
+  eq(out.closed, true)
+  eq(out.windows_closed, 1)
+  eq(state.closed_windows[1], "tab2")
+  eq(#state.destroyed, 0, "destroyed")
+  eq(#state.queued, 0, "selects")
+end)
+
+test("an untracked session keeps a tab where no pane reports a directory", function()
+  session_actions({ { "wt", IN_WORKTREE, { cwd = "x", window = "tab2" } } })
+  local out = close("wt")
+  eq(out.windows_closed, 1)
+  eq(state.closed_windows[1], "wt-w")
+  eq(#state.destroyed, 0, "destroyed")
+end)
+
+test("a tab with a pane outside the worktree is never closed", function()
+  session_actions({ { "here", { cwd = "/srv/a", pwd = "/srv/a" },
+    { cwd = "x", pwd = WORKTREE, window = "tab2" }, { cwd = "y", pwd = "/srv/b", window = "tab2" } } })
+  eq(close("here").closed, false)
+  eq(#state.closed_windows, 0, "windows closed")
+end)
+
+-- Tab mode
+
+local function open_feat(ctx)
+  state.exec = function() return { ok = true, stdout = "" } end
+  return state.actions.lanes_open.run(ctx, { path = WORKTREE, branch = "feat", main = MAIN, agent = "claude" })
+end
+
+test("in tab mode, a new worktree opens as a tab in the modal's session", function()
+  setup({ open = "tab" })
+  eq(run("lanes_new"), nil)
+  load_bundle()
+  local out = open_feat({ session_id = "s0" })
+  eq(out.created, true)
+  eq(#state.created, 0, "sessions created")
+  local args = state.new_windows[1]
+  eq(args.session_id, "s0")
+  eq(args.window_label, "feat")
+  eq(args.layout[2].block.options.initial_input, "claude\n", "the default tab's agent pane")
+  local session_id, window_id = shown()
+  eq(session_id, "s0")
+  eq(window_id, "new1")
+  eq(state.saved[WORKTREE].session_id, "s0")
+  eq(state.saved[WORKTREE].window_id, "new1")
+end)
+
+test("in tab mode, the layout's tab is used", function()
+  setup({ open = "tab", layouts = { { repo = "*", tabs = { {} }, tab = { command = "make" } } } })
+  eq(run("lanes_new"), nil)
+  load_bundle()
+  open_feat({ session_id = "s0" })
+  eq(state.new_windows[1].layout.block.options.initial_input, "make\n")
+end)
+
+test("in tab mode, opening by hand outside Rex fails clearly", function()
+  setup({ open = "tab" })
+  eq(run("lanes_new"), nil)
+  load_bundle()
+  local ok, err = pcall(open_feat, {})
+  eq(ok, false)
+  has(err, "run it from a Rex terminal")
+end)
+
+test("a worktree's session is found whatever the mode", function()
+  session_actions({ { "here", { cwd = "/srv/a" } }, { "wt", { cwd = "/elsewhere" } } }, { open = "tab" })
+  track(WORKTREE, "wt")
+  local out = open_feat({ session_id = "here" })
+  eq(out.created, false)
+  eq(shown(), "wt")
+  eq(#state.new_windows, 0, "tabs created")
+end)
+
+test("a worktree's tab is found in session mode", function()
+  session_actions({ { "here", { cwd = "/srv/a" }, { cwd = "/elsewhere", window = "tab2" } } })
+  track(WORKTREE, { session_id = "here", window_id = "tab2" })
+  local out = open_feat({ session_id = "here" })
+  eq(out.created, false)
+  eq(#state.created, 0, "sessions created")
+  local _, window_id = shown()
+  eq(window_id, "tab2")
+end)
+
+test("removing a worktree closes its tab and keeps the session", function()
+  session_actions({ { "here", { cwd = "/srv/a" }, IN_WORKTREE_TAB } })
+  track(WORKTREE, { session_id = "here", window_id = "tab2" })
+  local out = close("here")
+  eq(out.closed, true)
+  eq(state.closed_windows[1], "tab2")
+  eq(#state.destroyed, 0, "destroyed")
+  eq(#state.queued, 0, "selects")
+  eq(state.saved[WORKTREE], nil)
+end)
+
+test("a tab that is its session's only tab takes the session with it", function()
+  session_actions({ { "here", { cwd = "/srv/a", window = "tab2" } }, { "main", { cwd = MAIN } } })
+  track(WORKTREE, { session_id = "here", window_id = "tab2" })
+  close("here")
+  eq(state.destroyed[1], "here")
+  eq(shown(), "main")
+end)
+
+test("removing a worktree keeps another worktree's tab in its session", function()
+  session_actions({ { "wt", IN_WORKTREE, { cwd = "/srv/repo.b", pwd = "/srv/repo.b", window = "tab2" } } })
+  track(WORKTREE, "wt")
+  track("/srv/repo.b", { session_id = "wt", window_id = "tab2" })
+  local out = close("wt")
+  eq(out.closed, true)
+  eq(#state.destroyed, 0, "destroyed")
+  eq(#state.closed_windows, 1, "windows closed")
+  eq(state.closed_windows[1], "wt-w")
+  eq(state.saved[WORKTREE], nil)
+  eq(state.saved["/srv/repo.b"].window_id, "tab2")
+end)
+
+test("without a kept lane, another worktree's tab is never closed", function()
+  -- repo.b's panes moved into the removed worktree, yet its tab stays.
+  session_actions({ { "here", { cwd = "/srv/a", pwd = "/srv/a" }, IN_WORKTREE_TAB,
+    { cwd = "y", pwd = WORKTREE, window = "tab3" } } })
+  track("/srv/repo.b", { session_id = "here", window_id = "tab3" })
+  close("here")
+  eq(#state.closed_windows, 1, "windows closed")
+  eq(state.closed_windows[1], "tab2")
+  eq(state.saved["/srv/repo.b"].window_id, "tab3")
+end)
+
+test("removing a tab lists its session once", function()
+  session_actions({ { "here", { cwd = "/srv/a" }, IN_WORKTREE_TAB }, { "main", { cwd = MAIN } } })
+  track(WORKTREE, { session_id = "here", window_id = "tab2" })
+  close("here")
+  eq(state.listed.here, 1, "listings of the session")
+end)
+
+-- State files
+
+local function write_raw(raw)
+  state.saved = raw
+  local f = assert(io.open(STATE_HOME .. "/rex/lanes.json", "w"))
+  f:write("{}")
+  f:close()
+end
+
+test("an old state file's session IDs still open their sessions", function()
+  session_actions({ { "wt", { cwd = "/elsewhere" } } })
+  write_raw({ ["/srv/repo"] = "wt" })
+  local out = state.actions.lanes_open.run({ session_id = "wt" }, { path = MAIN, branch = "b", main = MAIN })
+  eq(out.session_id, "wt")
+  eq(out.created, false)
+end)
+
+test("junk entries are dropped and session lanes are written back as IDs", function()
+  session_actions({ { "wt", { cwd = "/elsewhere" } } })
+  write_raw({ ["/srv/repo"] = "wt", ["/junk"] = 3, ["/junk2"] = { window_id = "x" }, ["/gone"] = "nope" })
+  state.actions.lanes_open.run({ session_id = "wt" }, { path = MAIN, branch = "b", main = MAIN })
+  eq(state.saved["/srv/repo"], "wt")
+  eq(state.saved["/junk"], nil)
+  eq(state.saved["/junk2"], nil)
+  eq(state.saved["/gone"], nil)
+end)
+
+test("a tab entry whose tab is gone is stale, a live one is kept", function()
+  session_actions({ { "s", { cwd = "/elsewhere" }, { cwd = "/elsewhere", window = "tab2" } } })
+  write_raw({
+    ["/srv/repo"] = { session_id = "s", window_id = "gone" },
+    ["/srv/live"] = { session_id = "s", window_id = "tab2" },
+    ["/srv/other"] = { session_id = "missing", window_id = "tab2" },
+  })
+  local out = state.actions.lanes_open.run({ session_id = "s" }, { path = MAIN, branch = "b", main = MAIN })
+  eq(out.needs_agent, true)
+  eq(state.saved["/srv/repo"], nil)
+  eq(state.saved["/srv/other"], nil)
+  eq(state.saved["/srv/live"].window_id, "tab2")
+end)
+
+test("a detached pane doesn't keep a tab entry alive", function()
+  session_actions({ { "s", { cwd = "/elsewhere" }, { cwd = "/elsewhere", window = false } } })
+  write_raw({ ["/srv/repo"] = { session_id = "s", window_id = "tab9" } })
+  eq(state.actions.lanes_open.run({ session_id = "s" }, { path = MAIN, branch = "b", main = MAIN }).needs_agent, true)
 end)
 
 os.execute("rm -rf '" .. STATE_HOME .. "'")

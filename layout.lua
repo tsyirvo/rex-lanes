@@ -1,5 +1,5 @@
--- What a worktree's session looks like: which layout applies to it, the tabs
--- and panes that layout makes, and the session's label. Nothing here calls
+-- What a worktree's session or tab looks like: which layout applies to it, the
+-- tabs and panes that layout makes, and their labels. Nothing here calls
 -- Rex. The layout builders come in as an argument (rex.layout in Rex), so the
 -- tests can run this file under plain Lua 5.1.
 --
@@ -8,13 +8,15 @@
 
 local L = {}
 
--- Used when no layout matches: the agent in one tab, a shell in another.
+-- Used when no layout matches: the agent in one tab and a shell in another,
+-- or, as a single tab, the agent beside a shell.
 L.DEFAULT = {
   repo = "*",
   tabs = {
     { name = "agent", agent = true },
     { name = "terminal" },
   },
+  tab = { panes = { { agent = true }, { split = "right" } } },
 }
 
 local SHELL = "com.superlogical.terminal.shell"
@@ -41,12 +43,15 @@ function L.describe(path, branch, main, repo)
   }
 end
 
--- Cut to the server's 128-character limit. A cut label loses its last
--- character when that one is not ASCII, so a cut never splits a character.
+-- Cut to the server's 128-character limit for labels. A cut text loses its
+-- last character when that one is not ASCII, so a cut never splits a character.
+function L.cut(text)
+  if #text <= 128 then return text end
+  return (text:sub(1, 128):gsub("[\192-\255][\128-\191]*$", ""))
+end
+
 function L.label(wt)
-  local label = wt.repo .. "/" .. wt.branch
-  if #label <= 128 then return label end
-  return (label:sub(1, 128):gsub("[\192-\255][\128-\191]*$", ""))
+  return L.cut(wt.repo .. "/" .. wt.branch)
 end
 
 -- Converts the terminal's pwd value to a path. A shell that uses OSC 7 reports
@@ -91,6 +96,7 @@ end
 -- lanes_open and lanes_close on the machine that runs it. The fields of parts:
 --   init, layout: the source of init.lua and layout.lua.
 --   layouts: the source of the layouts.
+--   open: the open option, "session" or "tab".
 --   path: the package.path of the config. A layouts file can then require the
 --     files next to it, if they are on that machine.
 function L.bundle(parts)
@@ -98,15 +104,17 @@ function L.bundle(parts)
     ("package.path = %q .. package.path"):format(parts.path .. ";"),
     ('package.preload["lanes.layout"] = assert(loadstring(%q, "=lanes/layout.lua"))'):format(parts.layout),
     ('local lanes = assert(loadstring(%q, "=lanes/init.lua"))("lanes")'):format(parts.init),
-    ('lanes.session_actions(assert(loadstring(%q, "=lanes layouts"))())'):format(parts.layouts),
+    ('lanes.session_actions{ layouts = assert(loadstring(%q, "=lanes layouts"))(), open = %q }')
+      :format(parts.layouts, parts.open),
   }, "\n")
 end
 
 -- Checking layouts. Each mistake names its place, such as
 -- layouts[2].tabs[1].panes[3].split, so a typo can't pass for a default.
 
+local LAYOUT_KEYS = { repo = true, tabs = true, tab = true }
 local TAB_KEYS  = { name = true, agent = true, command = true, cwd = true, panes = true }
-local PANE_KEYS = { command = true, cwd = true, split = true, ratio = true }
+local PANE_KEYS = { agent = true, command = true, cwd = true, split = true, ratio = true }
 
 local function is_list(t)
   if type(t) ~= "table" then return false end
@@ -135,6 +143,10 @@ local function check_pane(pane, i, where)
     or check_value(pane.command, where .. ".command")
     or check_value(pane.cwd, where .. ".cwd")
   if err then return err end
+  if pane.agent ~= nil and type(pane.agent) ~= "boolean" then
+    return where .. ".agent: expected true or false, got " .. type(pane.agent)
+  end
+  if pane.agent and pane.command ~= nil then return where .. ": give a pane one of agent or command" end
   if i == 1 and (pane.split ~= nil or pane.ratio ~= nil) then
     return where .. ": the first pane has no pane before it to split from"
   end
@@ -178,17 +190,26 @@ function L.check(layouts)
   for i, layout in ipairs(layouts) do
     local where = "layouts[" .. i .. "]"
     if type(layout) ~= "table" then return where .. ": expected a table, got " .. type(layout) end
-    local err = check_keys(layout, { repo = true, tabs = true }, where)
+    local err = check_keys(layout, LAYOUT_KEYS, where)
     if err then return err end
     if layout.repo ~= nil and type(layout.repo) ~= "string" then
       return where .. ".repo: expected a string, got " .. type(layout.repo)
     end
-    if not is_list(layout.tabs) or #layout.tabs == 0 then
-      return where .. ".tabs: expected a list of one or more tabs"
+    if layout.tabs == nil and layout.tab == nil then return where .. ": give a layout tabs or tab" end
+    if layout.tabs ~= nil then
+      if not is_list(layout.tabs) or #layout.tabs == 0 then
+        return where .. ".tabs: expected a list of one or more tabs"
+      end
+      for j, tab in ipairs(layout.tabs) do
+        err = check_tab(tab, where .. ".tabs[" .. j .. "]")
+        if err then return err end
+      end
     end
-    for j, tab in ipairs(layout.tabs) do
-      err = check_tab(tab, where .. ".tabs[" .. j .. "]")
+    if layout.tab ~= nil then
+      err = check_tab(layout.tab, where .. ".tab")
       if err then return err end
+      -- One fixed name would label every worktree's tab the same.
+      if layout.tab.name ~= nil then return where .. ".tab.name: the tab is labelled with the branch" end
     end
   end
 end
@@ -207,13 +228,19 @@ local function repo_matches(layout, wt)
 end
 
 -- The first layout naming this repo, else the first "*" one, else the default.
-function L.pick(layouts, wt)
+-- mode is "session" (the layout's tabs) or "tab" (its tab). A layout without
+-- the field for the mode doesn't take part, so in tab mode a repo's tabs-only
+-- layout gives way to a "*" one with a tab.
+function L.pick(layouts, wt, mode)
+  local field = mode == "tab" and "tab" or "tabs"
   local wildcard = L.DEFAULT
   for _, layout in ipairs(layouts) do
-    if (layout.repo or "*") == "*" then
-      if wildcard == L.DEFAULT then wildcard = layout end
-    elseif repo_matches(layout, wt) then
-      return layout
+    if layout[field] ~= nil then
+      if (layout.repo or "*") == "*" then
+        if wildcard == L.DEFAULT then wildcard = layout end
+      elseif repo_matches(layout, wt) then
+        return layout
+      end
     end
   end
   return wildcard
@@ -233,8 +260,10 @@ local function join(base, dir)
 end
 
 -- A shell with the command typed in, so quitting it leaves a prompt in place.
-local function pane_block(build, pane, cwd, wt)
-  local command = resolve(pane.command, wt)
+-- An agent pane types the agent, and is a plain shell when there is none.
+local function pane_block(build, pane, cwd, wt, agent)
+  local command
+  if pane.agent then command = agent else command = resolve(pane.command, wt) end
   if command == "" then command = nil end
   return build.block{
     flavor  = SHELL,
@@ -245,12 +274,19 @@ end
 -- Pane i, then the panes after it split off: the next pane takes its ratio of
 -- the space beside ("right") or below ("down") pane i, and the panes after it
 -- share that space the same way.
-local function panes_layout(build, panes, i, cwd, wt)
-  local here = pane_block(build, panes[i], cwd, wt)
+local function panes_layout(build, panes, i, cwd, wt, agent)
+  local here = pane_block(build, panes[i], cwd, wt, agent)
   local nxt = panes[i + 1]
   if nxt == nil then return here end
   local split = nxt.split == "right" and build.horizontal or build.vertical
-  return split(1 - (nxt.ratio or 0.5), here, panes_layout(build, panes, i + 1, cwd, wt))
+  return split(1 - (nxt.ratio or 0.5), here, panes_layout(build, panes, i + 1, cwd, wt, agent))
+end
+
+-- One window: its label and layout. An agent tab with no agent is a plain shell.
+function L.window(build, tab, wt, agent, label)
+  local cwd = join(wt.path, resolve(tab.cwd, wt))
+  local panes = tab.panes or { { agent = tab.agent, command = tab.command } }
+  return { window_label = label, layout = panes_layout(build, panes, 1, cwd, wt, agent) }
 end
 
 -- The windows session.create takes, in layout order. The agent tab runs agent
@@ -259,12 +295,16 @@ function L.windows(build, layout, wt, agent)
   local windows = {}
   for _, tab in ipairs(layout.tabs) do
     if not tab.agent or (agent and agent ~= "") then
-      local cwd = join(wt.path, resolve(tab.cwd, wt))
-      local panes = tab.panes or { { command = tab.agent and agent or tab.command } }
-      windows[#windows + 1] = { window_label = tab.name, layout = panes_layout(build, panes, 1, cwd, wt) }
+      windows[#windows + 1] = L.window(build, tab, wt, agent, tab.name)
     end
   end
   return windows
+end
+
+-- The window session.new_window takes for the layout's tab, labelled with the
+-- branch. It is never left out: the worktree needs somewhere to live.
+function L.tab_window(build, layout, wt, agent)
+  return L.window(build, layout.tab, wt, agent, L.cut(wt.branch))
 end
 
 return L

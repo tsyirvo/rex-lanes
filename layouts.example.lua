@@ -1,5 +1,9 @@
--- Lanes layouts: the tabs and panes a new worktree session opens with. Copy
--- this file to ~/.config/rex/lanes-layouts.lua and change it to fit.
+-- Lanes layouts: the tabs and panes a new worktree opens with. Copy this file
+-- to ~/.config/rex/lanes-layouts.lua and change it to fit.
+--
+-- A layout has `tabs`, for a new session (open = "session"), and/or `tab`, the
+-- one tab of a new worktree (open = "tab"). In tab mode a layout without `tab`
+-- is skipped, so give each layout both to serve both modes.
 --
 -- The first layout whose `repo` matches wins, else the first `repo = "*"` one.
 -- `repo` is the repo's name on its forge (as WorkTrunk reports it) or the main
@@ -9,11 +13,14 @@
 -- A tab has at most one of agent, command and panes:
 --   name     the tab's label
 --   agent    true: runs the agent picked in the modal; left out when none is
+--            (a `tab` is never left out: it becomes a plain shell)
 --   command  typed into the tab's shell (a tab without one is a plain shell)
 --   panes    a list of panes
 --   cwd      where the tab starts, relative to the worktree
 --
 -- A pane:
+--   agent    true: runs the agent picked in the modal; a plain shell when none
+--            is. Not with command.
 --   command  typed into the pane's shell
 --   split    "right" (beside) or "down" (below, the default) the pane before
 --            it. The first pane has none.
@@ -46,6 +53,12 @@ return {
       } },
       { name = "dev", command = "npm run dev" },
     },
+    -- The same worktree as one tab: agent beside the install, dev server below.
+    tab = { panes = {
+      { agent = true },
+      { split = "right", command = function(wt) return has(wt, "bun.lock") and "bun install" or "npm install" end },
+      { split = "down", command = "npm run dev" },
+    } },
   },
   {
     repo = "*",
@@ -53,5 +66,6 @@ return {
       { name = "agent", agent = true },
       { name = "terminal" },
     },
+    tab = { panes = { { agent = true }, { split = "right" } } },
   },
 }

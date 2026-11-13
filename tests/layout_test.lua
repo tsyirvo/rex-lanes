@@ -107,6 +107,24 @@ test("the default applies with no layouts", function()
   eq(L.pick({}, wt), L.DEFAULT)
 end)
 
+test("in tab mode, a repo's tabs-only layout gives way to a wildcard tab", function()
+  local mine = { repo = "my-app", tabs = { { name = "mine" } } }
+  local any = { repo = "*", tab = { command = "x" } }
+  eq(L.pick({ mine, any }, wt, "tab"), any)
+  eq(L.pick({ mine, any }, wt, "session"), mine)
+  eq(L.pick({ mine, any }, wt), mine, "session by default")
+end)
+
+test("in tab mode, a repo's tab layout wins", function()
+  local any = { repo = "*", tab = { command = "any" } }
+  local mine = { repo = "my-app", tabs = { {} }, tab = { command = "mine" } }
+  eq(L.pick({ any, mine }, wt, "tab"), mine)
+end)
+
+test("in session mode, a tab-only layout doesn't take part", function()
+  eq(L.pick({ { repo = "*", tab = {} } }, wt, "session"), L.DEFAULT)
+end)
+
 -- windows
 
 test("the agent tab runs the agent", function()
@@ -121,6 +139,22 @@ end)
 test("the agent tab is left out with no agent", function()
   eq(#L.windows(build, L.DEFAULT, wt, ""), 1, "with \"\"")
   eq(#L.windows(build, L.DEFAULT, wt, nil), 1, "with nil")
+end)
+
+test("an agent pane runs the agent beside a shell", function()
+  local layout = { tabs = { { panes = { { agent = true }, { split = "right" } } } } }
+  local split = L.windows(build, layout, wt, "claude")[1].layout.split
+  eq(split.before.block.options.initial_input, "claude\n")
+  eq(split.after.block.options.initial_input, nil)
+end)
+
+test("an agent pane is a plain shell with no agent, keeping the tab", function()
+  local layout = { tabs = { { panes = { { agent = true }, { split = "right" } } } } }
+  for _, agent in ipairs({ "", false }) do
+    local windows = L.windows(build, layout, wt, agent or nil)
+    eq(#windows, 1, "windows")
+    eq(windows[1].layout.split.before.block.options.initial_input, nil)
+  end
 end)
 
 test("panes split right and down with their ratios", function()
@@ -171,6 +205,24 @@ test("a function returning nil or \"\" leaves a plain shell", function()
   eq(windows[2].layout.block.options.initial_input, nil)
 end)
 
+test("the tab window is labelled with the branch and runs the agent beside a shell", function()
+  local window = L.tab_window(build, L.DEFAULT, wt, "claude")
+  eq(window.window_label, "feat")
+  eq(window.layout.split.before.block.options.initial_input, "claude\n")
+  eq(window.layout.split.before.block.options.cwd, "/src/app.feat")
+  eq(window.layout.split.after.block.options.initial_input, nil)
+end)
+
+test("an agent tab is a plain shell with no agent", function()
+  local window = L.tab_window(build, { tab = { agent = true } }, wt, "")
+  eq(window.layout.block.options.initial_input, nil)
+end)
+
+test("the tab label is cut like a session label", function()
+  local label = L.tab_window(build, L.DEFAULT, { path = "/w", branch = string.rep("a", 127) .. "é" }, "").window_label
+  eq(label, string.rep("a", 127))
+end)
+
 -- check
 
 test("the example layouts and the default pass", function()
@@ -190,7 +242,6 @@ local function one_tab(tab) return { { tabs = { tab } } } end
 test("layouts must be a list of tables with tabs", function()
   has(mistake("x"), "layouts: expected a list")
   has(mistake({ repo = "x" }), "layouts: expected a list")
-  has(mistake({ { repo = "x" } }), "layouts[1].tabs: expected a list")
   has(mistake({ { tabs = {} } }), "layouts[1].tabs: expected a list")
   has(mistake({ { repo = 3, tabs = { {} } } }), "layouts[1].repo: expected a string")
 end)
@@ -205,6 +256,21 @@ test("a tab has at most one of agent, command and panes", function()
   has(mistake(one_tab({ agent = true, command = "x" })), "one of agent, command or panes")
   has(mistake(one_tab({ command = "x", panes = { {} } })), "one of agent, command or panes")
   has(mistake(one_tab({ agent = "yes" })), "tabs[1].agent: expected true or false")
+end)
+
+test("a pane has at most one of agent and command", function()
+  has(mistake(one_tab({ panes = { { agent = true, command = "x" } } })), "panes[1]: give a pane one of agent or command")
+  has(mistake(one_tab({ panes = { { agent = 1 } } })), "panes[1].agent: expected true or false")
+  eq(L.check(one_tab({ panes = { { agent = true }, { split = "right" } } })), nil)
+end)
+
+test("a layout has tabs or a tab, and the tab has no name", function()
+  has(mistake({ { repo = "x" } }), "layouts[1]: give a layout tabs or tab")
+  has(mistake({ { tab = { name = "x" } } }), "layouts[1].tab.name: the tab is labelled with the branch")
+  has(mistake({ { tab = { comand = "x" } } }), "layouts[1].tab: unknown field comand")
+  has(mistake({ { tab = { agent = true, command = "x" } } }), "layouts[1].tab: give a tab one of agent")
+  eq(L.check({ { tab = { panes = { { agent = true }, { split = "down" } } } } }), nil)
+  eq(L.check({ { tabs = { {} }, tab = {} } }), nil)
 end)
 
 test("split must be right or down", function()
