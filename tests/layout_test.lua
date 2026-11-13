@@ -123,6 +123,22 @@ test("the agent tab is left out with no agent", function()
   eq(#L.windows(build, L.DEFAULT, wt, nil), 1, "with nil")
 end)
 
+test("an agent pane runs the agent beside a shell", function()
+  local layout = { tabs = { { panes = { { agent = true }, { split = "right" } } } } }
+  local split = L.windows(build, layout, wt, "claude")[1].layout.split
+  eq(split.before.block.options.initial_input, "claude\n")
+  eq(split.after.block.options.initial_input, nil)
+end)
+
+test("an agent pane is a plain shell with no agent, keeping the tab", function()
+  local layout = { tabs = { { panes = { { agent = true }, { split = "right" } } } } }
+  for _, agent in ipairs({ "", false }) do
+    local windows = L.windows(build, layout, wt, agent or nil)
+    eq(#windows, 1, "windows")
+    eq(windows[1].layout.split.before.block.options.initial_input, nil)
+  end
+end)
+
 test("panes split right and down with their ratios", function()
   local layout = { tabs = { { panes = {
     { command = "a" },
@@ -205,6 +221,12 @@ test("a tab has at most one of agent, command and panes", function()
   has(mistake(one_tab({ agent = true, command = "x" })), "one of agent, command or panes")
   has(mistake(one_tab({ command = "x", panes = { {} } })), "one of agent, command or panes")
   has(mistake(one_tab({ agent = "yes" })), "tabs[1].agent: expected true or false")
+end)
+
+test("a pane has at most one of agent and command", function()
+  has(mistake(one_tab({ panes = { { agent = true, command = "x" } } })), "panes[1]: give a pane one of agent or command")
+  has(mistake(one_tab({ panes = { { agent = 1 } } })), "panes[1].agent: expected true or false")
+  eq(L.check(one_tab({ panes = { { agent = true }, { split = "right" } } })), nil)
 end)
 
 test("split must be right or down", function()

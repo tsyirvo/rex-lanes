@@ -106,7 +106,7 @@ end
 -- layouts[2].tabs[1].panes[3].split, so a typo can't pass for a default.
 
 local TAB_KEYS  = { name = true, agent = true, command = true, cwd = true, panes = true }
-local PANE_KEYS = { command = true, cwd = true, split = true, ratio = true }
+local PANE_KEYS = { agent = true, command = true, cwd = true, split = true, ratio = true }
 
 local function is_list(t)
   if type(t) ~= "table" then return false end
@@ -135,6 +135,10 @@ local function check_pane(pane, i, where)
     or check_value(pane.command, where .. ".command")
     or check_value(pane.cwd, where .. ".cwd")
   if err then return err end
+  if pane.agent ~= nil and type(pane.agent) ~= "boolean" then
+    return where .. ".agent: expected true or false, got " .. type(pane.agent)
+  end
+  if pane.agent and pane.command ~= nil then return where .. ": give a pane one of agent or command" end
   if i == 1 and (pane.split ~= nil or pane.ratio ~= nil) then
     return where .. ": the first pane has no pane before it to split from"
   end
@@ -233,8 +237,10 @@ local function join(base, dir)
 end
 
 -- A shell with the command typed in, so quitting it leaves a prompt in place.
-local function pane_block(build, pane, cwd, wt)
-  local command = resolve(pane.command, wt)
+-- An agent pane types the agent, and is a plain shell when there is none.
+local function pane_block(build, pane, cwd, wt, agent)
+  local command
+  if pane.agent then command = agent else command = resolve(pane.command, wt) end
   if command == "" then command = nil end
   return build.block{
     flavor  = SHELL,
@@ -245,12 +251,12 @@ end
 -- Pane i, then the panes after it split off: the next pane takes its ratio of
 -- the space beside ("right") or below ("down") pane i, and the panes after it
 -- share that space the same way.
-local function panes_layout(build, panes, i, cwd, wt)
-  local here = pane_block(build, panes[i], cwd, wt)
+local function panes_layout(build, panes, i, cwd, wt, agent)
+  local here = pane_block(build, panes[i], cwd, wt, agent)
   local nxt = panes[i + 1]
   if nxt == nil then return here end
   local split = nxt.split == "right" and build.horizontal or build.vertical
-  return split(1 - (nxt.ratio or 0.5), here, panes_layout(build, panes, i + 1, cwd, wt))
+  return split(1 - (nxt.ratio or 0.5), here, panes_layout(build, panes, i + 1, cwd, wt, agent))
 end
 
 -- The windows session.create takes, in layout order. The agent tab runs agent
@@ -260,8 +266,8 @@ function L.windows(build, layout, wt, agent)
   for _, tab in ipairs(layout.tabs) do
     if not tab.agent or (agent and agent ~= "") then
       local cwd = join(wt.path, resolve(tab.cwd, wt))
-      local panes = tab.panes or { { command = tab.agent and agent or tab.command } }
-      windows[#windows + 1] = { window_label = tab.name, layout = panes_layout(build, panes, 1, cwd, wt) }
+      local panes = tab.panes or { { agent = tab.agent, command = tab.command } }
+      windows[#windows + 1] = { window_label = tab.name, layout = panes_layout(build, panes, 1, cwd, wt, agent) }
     end
   end
   return windows
