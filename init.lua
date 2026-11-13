@@ -1,5 +1,5 @@
 -- Lanes: create and remove git worktrees from a modal, one Rex session or tab
--- per worktree, laid out per repository. WorkTrunk (`wt`) does the git work.
+-- per worktree (see `open`), laid out per repository. WorkTrunk (`wt`) does the git work.
 --
 -- Clone into ~/.config/rex/lanes, copy layouts.example.lua to
 -- ~/.config/rex/lanes-layouts.lua, then in ~/.config/rex/init.lua:
